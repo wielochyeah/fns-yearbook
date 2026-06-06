@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties } from "react"
+import { useEffect, useState, type CSSProperties } from "react"
 import { Download, FolderOpen, FileArchive, FileSpreadsheet } from "lucide-react"
 import { toast } from "sonner"
 
@@ -31,6 +31,12 @@ import {
   supportsDirectoryPicker,
   type ExportFile,
 } from "@/lib/export"
+import {
+  FONT_WEIGHTS,
+  MONTSERRAT_STACK,
+  isMontserrat,
+  prepareMontserrat,
+} from "@/lib/fonts"
 
 type Props = {
   file: File | null
@@ -42,8 +48,10 @@ type Props = {
 
 type Chart = { name: string; filename: string; svg: string }
 
-// Web-sichere Schriften (müssen beim Öffnen des SVG vorhanden sein)
+// Schriften. Montserrat wird in die SVGs eingebettet (base64), die übrigen sind
+// websicher und müssen beim Öffnen des SVG vorhanden sein.
 const FONTS: { label: string; value: string }[] = [
+  { label: "Montserrat", value: MONTSERRAT_STACK },
   { label: "Arial", value: "Arial, Helvetica, sans-serif" },
   { label: "Helvetica", value: "Helvetica, Arial, sans-serif" },
   { label: "Verdana", value: "Verdana, Geneva, sans-serif" },
@@ -74,20 +82,82 @@ export function ChartsPage({
   const [barColor, setBarColor] = useState(DEFAULT_CONFIG.barColor)
   const [markerColor, setMarkerColor] = useState(DEFAULT_CONFIG.markerColor)
   const [transparent, setTransparent] = useState(true)
-  const [fontFamily, setFontFamily] = useState(DEFAULT_CONFIG.fontFamily)
+  const [fontFamily, setFontFamily] = useState(MONTSERRAT_STACK)
+  const [fontWeight, setFontWeight] = useState("700")
+  const [fontSize, setFontSize] = useState(DEFAULT_CONFIG.labelFontSize)
+  const [labelAlign, setLabelAlign] = useState<"left" | "right">("right")
+  const [textSide, setTextSide] = useState<"left" | "right">("left")
+  const [charts, setCharts] = useState<Chart[]>([])
+  // Aus dem Excel-Sheet extrahierte Eigenschafts-Beschriftungen – im Frontend
+  // editierbar. Wird bei jeder neuen Datei aus parsed.traits neu befüllt.
+  const [labels, setLabels] = useState<string[]>([])
 
-  const charts = useMemo<Chart[]>(() => {
-    if (!parsed) return []
-    const cfg = { ...DEFAULT_CONFIG, barColor, markerColor, transparent, fontFamily }
-    const filenames = assignFilenames(parsed.people.map((p) => p.name))
-    return parsed.people.map((p, i) => {
-      const traits: Trait[] = parsed.traits.map((label, j) => ({
-        label,
-        value: p.values[j] ?? 0,
-      }))
-      return { name: p.name, filename: filenames[i], svg: buildSvg(traits, cfg) }
-    })
-  }, [parsed, barColor, markerColor, transparent, fontFamily])
+  useEffect(() => {
+    setLabels(parsed?.traits ?? [])
+  }, [parsed])
+
+  const labelsDirty =
+    !!parsed &&
+    (labels.length !== parsed.traits.length ||
+      labels.some((l, j) => l !== parsed.traits[j]))
+
+  // Chart-Erzeugung ist asynchron, weil Montserrat erst geladen/eingebettet
+  // werden muss (Vorschau + base64-@font-face fürs SVG).
+  useEffect(() => {
+    let cancelled = false
+    async function build() {
+      if (!parsed) {
+        setCharts([])
+        return
+      }
+      let fontFaceCss: string | undefined
+      if (isMontserrat(fontFamily)) {
+        fontFaceCss = await prepareMontserrat(fontWeight)
+        if (cancelled) return
+      }
+      const labelFontSize = Math.min(72, Math.max(12, Math.round(fontSize) || 30))
+      // Zeilenhöhe mit der Schriftgröße skalieren (30 → 66 = bisheriges Default),
+      // aber nie kleiner als der Marker, damit nichts überlappt.
+      const rowHeight = Math.max(48, Math.round(labelFontSize * 2.2))
+      const cfg = {
+        ...DEFAULT_CONFIG,
+        barColor,
+        markerColor,
+        transparent,
+        fontFamily,
+        fontWeight,
+        labelFontSize,
+        labelAlign,
+        textSide,
+        rowHeight,
+        fontFaceCss,
+      }
+      const filenames = assignFilenames(parsed.people.map((p) => p.name))
+      const next = parsed.people.map((p, i) => {
+        const traits: Trait[] = parsed.traits.map((orig, j) => ({
+          label: labels[j] ?? orig,
+          value: p.values[j] ?? 0,
+        }))
+        return { name: p.name, filename: filenames[i], svg: buildSvg(traits, cfg) }
+      })
+      if (!cancelled) setCharts(next)
+    }
+    build()
+    return () => {
+      cancelled = true
+    }
+  }, [
+    parsed,
+    labels,
+    barColor,
+    markerColor,
+    transparent,
+    fontFamily,
+    fontWeight,
+    fontSize,
+    labelAlign,
+    textSide,
+  ])
 
   const files: ExportFile[] = charts.map((c) => ({
     name: c.filename,
@@ -124,6 +194,7 @@ export function ChartsPage({
             </CardTitle>
             <CardDescription>
               Spalte „Name“ → Dateiname, Spalten S–W → Eigenschaften (0–100 %).
+              Die Beschriftungen lassen sich unten anpassen.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
@@ -134,11 +205,40 @@ export function ChartsPage({
               busy={busy}
             />
             {parsed && parsed.traits.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 pt-1">
-                {parsed.traits.map((t) => (
-                  <Badge key={t} variant="outline">
-                    {t}
-                  </Badge>
+              <div className="flex flex-col gap-2 pt-1">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs font-medium text-muted-foreground">
+                    Beschriftungen ({parsed.traits.length})
+                  </Label>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => setLabels(parsed.traits)}
+                    disabled={!labelsDirty}
+                  >
+                    Zurücksetzen
+                  </Button>
+                </div>
+                {parsed.traits.map((orig, j) => (
+                  <Input
+                    key={j}
+                    value={labels[j] ?? orig}
+                    placeholder={orig}
+                    onChange={(e) => {
+                      const value = e.target.value
+                      setLabels((prev) => {
+                        const base =
+                          prev.length === parsed.traits.length
+                            ? prev
+                            : parsed.traits
+                        const next = base.slice()
+                        next[j] = value
+                        return next
+                      })
+                    }}
+                    className="h-8 text-sm"
+                  />
                 ))}
               </div>
             )}
@@ -169,6 +269,60 @@ export function ChartsPage({
                   </option>
                 ))}
               </select>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <Label className="text-sm" htmlFor="font-weight">
+                Schriftschnitt
+              </Label>
+              <select
+                id="font-weight"
+                value={fontWeight}
+                onChange={(e) => setFontWeight(e.target.value)}
+                className="h-8 w-40 rounded-md border bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              >
+                {FONT_WEIGHTS.map((w) => (
+                  <option key={w.value} value={w.value}>
+                    {w.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <Label className="text-sm" htmlFor="font-size">
+                Schriftgröße
+              </Label>
+              <Input
+                id="font-size"
+                type="number"
+                min={12}
+                max={72}
+                value={fontSize}
+                onChange={(e) => {
+                  const v = Number(e.target.value)
+                  if (Number.isFinite(v)) setFontSize(v)
+                }}
+                className="h-8 w-40"
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <Label className="text-sm" htmlFor="label-left">
+                Beschriftung linksbündig
+              </Label>
+              <Switch
+                id="label-left"
+                checked={labelAlign === "left"}
+                onCheckedChange={(v) => setLabelAlign(v ? "left" : "right")}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <Label className="text-sm" htmlFor="swap-sides">
+                Balken links, Text rechts
+              </Label>
+              <Switch
+                id="swap-sides"
+                checked={textSide === "right"}
+                onCheckedChange={(v) => setTextSide(v ? "right" : "left")}
+              />
             </div>
             <ColorRow label="Balkenfarbe" value={barColor} onChange={setBarColor} />
             <ColorRow

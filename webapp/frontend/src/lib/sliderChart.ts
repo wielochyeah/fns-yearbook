@@ -10,6 +10,12 @@ export type ChartConfig = {
   fontFamily: string
   fontWeight: string
   labelFontSize: number
+  // Ausrichtung der Beschriftungen in der Label-Spalte: "right" = bündig an den
+  // Balken (Standard), "left" = linksbündig am äußeren Rand.
+  labelAlign: "left" | "right"
+  // Auf welcher Seite die Beschriftungen stehen: "left" = Text links/Balken
+  // rechts (Standard), "right" = Balken links/Text rechts.
+  textSide: "left" | "right"
   pad: number
   rowHeight: number
   gap: number
@@ -18,6 +24,10 @@ export type ChartConfig = {
   barRadius: number
   markerWidth: number
   markerOverhang: number
+  // Optionales @font-face-CSS (z. B. eingebettetes Montserrat als base64),
+  // das in <defs><style> geschrieben wird, damit die Schrift im SVG überall
+  // korrekt dargestellt wird.
+  fontFaceCss?: string
 }
 
 export const DEFAULT_CONFIG: ChartConfig = {
@@ -29,6 +39,8 @@ export const DEFAULT_CONFIG: ChartConfig = {
   fontFamily: "Arial, Helvetica, sans-serif",
   fontWeight: "bold",
   labelFontSize: 30,
+  labelAlign: "right",
+  textSide: "left",
   pad: 24,
   rowHeight: 66,
   gap: 34,
@@ -79,10 +91,13 @@ export function buildSvg(
     0
   )
 
-  const barX = cfg.pad + labelColW + cfg.gap
-  const labelRightX = cfg.pad + labelColW
+  // Seiten je nach textSide: Standard Text links/Balken rechts, sonst getauscht.
+  const textOnRight = cfg.textSide === "right"
+  const barX = textOnRight ? cfg.pad : cfg.pad + labelColW + cfg.gap
+  const labelLeftX = textOnRight ? cfg.pad + cfg.barWidth + cfg.gap : cfg.pad
+  const labelRightX = labelLeftX + labelColW
 
-  const width = barX + cfg.barWidth + cfg.pad
+  const width = cfg.pad * 2 + labelColW + cfg.gap + cfg.barWidth
   const height = cfg.pad * 2 + n * cfg.rowHeight
   const markerH = cfg.barHeight + 2 * cfg.markerOverhang
 
@@ -92,6 +107,14 @@ export function buildSvg(
       height
     )}" viewBox="0 0 ${f0(width)} ${f0(height)}">`
   )
+  // Eingebettete Schrift (z. B. Montserrat als base64) – muss vor den <text>
+  // stehen, damit sie beim Rendern verfügbar ist. base64 + plain CSS enthalten
+  // keine XML-Sonderzeichen, daher ohne CDATA gültig (XML und HTML).
+  if (cfg.fontFaceCss) {
+    parts.push(
+      `<defs><style type="text/css">${cfg.fontFaceCss}</style></defs>`
+    )
+  }
   // Hintergrund-Rechteck nur wenn nicht transparent
   if (!cfg.transparent) {
     parts.push(
@@ -129,10 +152,13 @@ export function buildSvg(
     )
 
     const baseline = rowCenter + cfg.labelFontSize * 0.35
+    const leftAligned = cfg.labelAlign === "left"
+    const textX = leftAligned ? labelLeftX : labelRightX
+    const textAnchor = leftAligned ? "start" : "end"
     parts.push(
-      `<text x="${f1(labelRightX)}" y="${f1(
+      `<text x="${f1(textX)}" y="${f1(
         baseline
-      )}" text-anchor="end" font-family="${cfg.fontFamily}" font-weight="${
+      )}" text-anchor="${textAnchor}" font-family="${cfg.fontFamily}" font-weight="${
         cfg.fontWeight
       }" font-size="${cfg.labelFontSize}" fill="${cfg.textColor}">${xmlEscape(
         trait.label

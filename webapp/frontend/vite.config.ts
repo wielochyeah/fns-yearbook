@@ -30,6 +30,34 @@ function fixEmscriptenNanoid(): Plugin {
           'import runtime from $1'
         )
       }
+      // 3) getroot ist CommonJS (`exports.root` = globaler Kontext), wird in
+      //    emscripten-wasm-loader aber als ESM-Named-Import eingebunden
+      //    (`import { root } from 'getroot'`). Da das (exkludierte) Paket roh
+      //    ausgeliefert wird, findet das ESM-Linking die Binding nicht
+      //    ("Importing binding name 'root' is not found"). `root` ist nur der
+      //    globale Kontext -> direkt durch globalThis ersetzen.
+      if (/import \{ root \} from ['"]getroot['"]/.test(out)) {
+        out = out.replace(
+          /import \{ root \} from ['"]getroot['"];?/,
+          'const root = globalThis;'
+        )
+      }
+      // 4) Das Emscripten-Modul (lib/browser|node/hunspell.js) ist UMD/CJS
+      //    (`module.exports = Module`) ganz ohne ESM-Export. Da hunspell-asm aus
+      //    optimizeDeps ausgeschlossen ist, liefert Vite es im Dev-Modus roh als
+      //    ESM aus -> `import runtime from '.../hunspell.js'` findet keinen
+      //    default-Export ("Importing binding name 'default' cannot be resolved
+      //    by star export entries"). Die UMD-`module.exports`-Zeilen sind
+      //    typeof-guarded und in ESM harmlos; wir ergänzen nur den fehlenden
+      //    Default-Export auf das Factory-`Module`.
+      if (
+        id.includes('hunspell-asm') &&
+        /\/lib\/(browser|node)\/hunspell/.test(id) &&
+        /module\.exports\s*=\s*Module/.test(out) &&
+        !/export\s+default/.test(out)
+      ) {
+        out += '\nexport default Module;\n'
+      }
       return out === code ? null : { code: out, map: null }
     },
   }
