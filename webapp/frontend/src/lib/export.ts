@@ -3,7 +3,12 @@
 
 import JSZip from "jszip"
 
-export type ExportFile = { name: string; content: string }
+export type ExportFile = {
+  name: string
+  // Text (SVG) oder Binärdaten (PDF/Bild). JSZip und die File System Access API
+  // akzeptieren beides.
+  content: string | Uint8Array | ArrayBuffer | Blob
+}
 
 export const supportsDirectoryPicker =
   typeof window !== "undefined" && "showDirectoryPicker" in window
@@ -58,7 +63,7 @@ function triggerDownload(blob: Blob, name: string): void {
 
 // Minimal-Typen für die File System Access API (nicht überall in lib.dom)
 interface FileSystemWritableLike {
-  write(data: string | Blob): Promise<void>
+  write(data: string | Blob | Uint8Array | ArrayBuffer): Promise<void>
   close(): Promise<void>
 }
 interface FileSystemFileHandleLike {

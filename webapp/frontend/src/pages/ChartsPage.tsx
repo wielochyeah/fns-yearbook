@@ -1,5 +1,13 @@
-import { useEffect, useState, type CSSProperties } from "react"
-import { Download, FolderOpen, FileArchive, FileSpreadsheet } from "lucide-react"
+import { useEffect, useMemo, useState, type CSSProperties } from "react"
+import {
+  Download,
+  FolderOpen,
+  FileArchive,
+  FileSpreadsheet,
+  Loader2,
+  Settings,
+  X,
+} from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -37,6 +45,21 @@ import {
   isMontserrat,
   prepareMontserrat,
 } from "@/lib/fonts"
+import { extractRowImages } from "@/lib/xlsxImages"
+import {
+  fillTemplate,
+  buildMergeCsv,
+  configWeights,
+  mergeConfig,
+  templateFontSizes,
+  DEFAULT_TEMPLATE_CONFIG,
+  ICON_OPTIONS,
+  type TemplateConfig,
+  type FieldSetting,
+} from "@/lib/template"
+import { templateSvgToPdf } from "@/lib/templatePdf"
+
+const TPL_CONFIG_KEY = "fnf-template-config"
 
 type Props = {
   file: File | null
@@ -88,6 +111,39 @@ export function ChartsPage({
   const [labelAlign, setLabelAlign] = useState<"left" | "right">("right")
   const [textSide, setTextSide] = useState<"left" | "right">("left")
   const [charts, setCharts] = useState<Chart[]>([])
+  // Steckbrief-Template (Illustrator-SVG) + Fotoquelle
+  const [templateSvg, setTemplateSvg] = useState<string | null>(null)
+  const [templateName, setTemplateName] = useState("")
+  const [photoSource, setPhotoSource] = useState<"excel" | "upload">("excel")
+  // Alle hochgeladenen Bilddateien (Name + Daten-URL).
+  const [uploadedFiles, setUploadedFiles] = useState<
+    { fileName: string; dataUrl: string }[]
+  >([])
+  // Zuordnung Person (Excel-Zeile) -> Dateiname; automatisch per Vorname_Nachname,
+  // im Frontend manuell überschreibbar.
+  const [assignments, setAssignments] = useState<Record<number, string>>({})
+  const [tplBusy, setTplBusy] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [tplConfig, setTplConfig] = useState<TemplateConfig>(() => {
+    try {
+      const raw = localStorage.getItem(TPL_CONFIG_KEY)
+      return mergeConfig(raw ? JSON.parse(raw) : null)
+    } catch {
+      return DEFAULT_TEMPLATE_CONFIG
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem(TPL_CONFIG_KEY, JSON.stringify(tplConfig))
+    } catch {
+      /* ignore */
+    }
+  }, [tplConfig])
+  // In der Vorlage verwendete Schriftgrößen je Feld (für die Platzhalter im Popup).
+  const tplSizes = useMemo(
+    () => (templateSvg ? templateFontSizes(templateSvg) : {}),
+    [templateSvg]
+  )
   // Aus dem Excel-Sheet extrahierte Eigenschafts-Beschriftungen – im Frontend
   // editierbar. Wird bei jeder neuen Datei aus parsed.traits neu befüllt.
   const [labels, setLabels] = useState<string[]>([])
@@ -180,6 +236,165 @@ export function ChartsPage({
       toast.success(`ZIP mit ${files.length} SVG(s) erstellt`)
     } catch (err) {
       toast.error("ZIP fehlgeschlagen", { description: (err as Error).message })
+    }
+  }
+
+  // Normalisierung fürs Matching: Umlaute/ß transliterieren (Dateinamen nutzen
+  // oft „Mueller“/„Gross“ statt „Müller“/„Groß“), dann Sonderzeichen entfernen.
+  const normName = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/ä/g, "ae")
+      .replace(/ö/g, "oe")
+      .replace(/ü/g, "ue")
+      .replace(/ß/g, "ss")
+      .replace(/[^a-z0-9]/g, "")
+  // Schlüssel aus Vor- + Nachname, reihenfolge-unabhängig sortiert – passt für
+  // „Nachname_Vorname“ wie auch „Vorname_Nachname“. Zweitnamen werden ignoriert.
+  const pairKey = (a: string, b: string) =>
+    [normName(a), normName(b)].sort().join("|")
+  const personKey = (name: string) => {
+    const t = name.trim().split(/\s+/).filter(Boolean)
+    return t.length ? pairKey(t[0], t[t.length - 1]) : ""
+  }
+  // Dateiname „Nachname_Vorname.ext“ -> selber Schlüssel (Trenner _ . - Leerzeichen).
+  const fileNameKey = (fileName: string) => {
+    const t = fileName
+      .replace(/\.[^.]+$/, "")
+      .split(/[\s._-]+/)
+      .filter(Boolean)
+    return t.length ? pairKey(t[0], t[t.length - 1]) : ""
+  }
+
+  // Ordnet jeder noch freien Person die namentlich passende, noch freie Datei zu.
+  function autoAssign(
+    files: { fileName: string; dataUrl: string }[],
+    prev: Record<number, string>
+  ): Record<number, string> {
+    if (!parsed) return prev
+    const next = { ...prev }
+    const used = new Set(Object.values(next))
+    const byKey = new Map<string, string>()
+    for (const f of files) {
+      const k = fileNameKey(f.fileName)
+      if (k && !byKey.has(k)) byKey.set(k, f.fileName)
+    }
+    let changed = false
+    for (const p of parsed.people) {
+      if (next[p.rowExcel]) continue
+      const fn = byKey.get(personKey(p.name))
+      if (fn && !used.has(fn)) {
+        next[p.rowExcel] = fn
+        used.add(fn)
+        changed = true
+      }
+    }
+    return changed ? next : prev
+  }
+
+  function onTemplateFile(f: File | null) {
+    if (!f) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      setTemplateSvg(String(reader.result))
+      setTemplateName(f.name)
+    }
+    reader.readAsText(f)
+  }
+
+  function onPhotoFiles(list: FileList | null) {
+    if (!list || !list.length) return
+    Promise.all(
+      Array.from(list).map(
+        (f) =>
+          new Promise<{ fileName: string; dataUrl: string }>((res) => {
+            const reader = new FileReader()
+            reader.onload = () =>
+              res({ fileName: f.name, dataUrl: String(reader.result) })
+            reader.onerror = () => res({ fileName: f.name, dataUrl: "" })
+            reader.readAsDataURL(f)
+          })
+      )
+    ).then((read) => {
+      const merged = [...uploadedFiles]
+      for (const f of read.filter((x) => x.dataUrl)) {
+        const i = merged.findIndex((m) => m.fileName === f.fileName)
+        if (i >= 0) merged[i] = f
+        else merged.push(f)
+      }
+      setUploadedFiles(merged)
+      setAssignments((prev) => autoAssign(merged, prev))
+    })
+  }
+
+  // Wenn Excel und Bilder beide vorhanden sind (z. B. Bilder vor dem Generieren
+  // hochgeladen), Auto-Zuordnung nachziehen.
+  useEffect(() => {
+    if (!parsed || !uploadedFiles.length) return
+    setAssignments((prev) => autoAssign(uploadedFiles, prev))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parsed, uploadedFiles])
+
+  async function exportTemplateZip() {
+    if (!parsed || !templateSvg || charts.length !== parsed.people.length) return
+    setTplBusy(true)
+    try {
+      // Montserrat-Einbett-CSS für alle in der Config genutzten Gewichte.
+      const cssParts: string[] = []
+      for (const w of configWeights(tplConfig))
+        cssParts.push(await prepareMontserrat(w))
+      const css = cssParts.join("\n")
+      // Sicherstellen, dass die Schriften geladen sind, bevor gerastert wird.
+      if (document.fonts?.ready) await document.fonts.ready
+      // Fotos: aus Excel extrahieren oder aus Upload (nach Name).
+      let rowImages = new Map<number, string>()
+      if (photoSource === "excel" && file) rowImages = await extractRowImages(file)
+      let withPhoto = 0
+      // Sequentiell (nicht parallel): ein 300-dpi-Canvas pro Person, sonst Spitzen-RAM.
+      const out: ExportFile[] = []
+      for (let i = 0; i < parsed.people.length; i++) {
+        const p = parsed.people[i]
+        const photo =
+          photoSource === "excel"
+            ? rowImages.get(p.rowExcel) ?? null
+            : uploadedFiles.find((f) => f.fileName === assignments[p.rowExcel])
+                ?.dataUrl ?? null
+        if (photo) withPhoto++
+        const svg = fillTemplate({
+          templateSvg,
+          header: parsed.header,
+          row: parsed.rows[p.rowExcel - 2],
+          name: p.name,
+          chartSvg: charts[i].svg,
+          photoDataUrl: photo,
+          fontFaceCss: css,
+          config: tplConfig,
+        })
+        const pdf = await templateSvgToPdf(svg)
+        const base = charts[i].filename.replace(/\.svg$/i, "")
+        out.push({ name: `${base}_steckbrief.svg`, content: svg })
+        out.push({ name: `${base}_steckbrief.pdf`, content: pdf })
+      }
+      // CSV der zusammengeführten Daten mit ins ZIP.
+      const csv = buildMergeCsv({
+        people: parsed.people.map((p) => ({
+          name: p.name,
+          row: parsed.rows[p.rowExcel - 2],
+        })),
+        header: parsed.header,
+        config: tplConfig,
+      })
+      out.push({ name: "daten.csv", content: csv })
+      await downloadZip(out, "steckbriefe.zip")
+      toast.success(
+        `${parsed.people.length} Steckbrief(e) als PDF + SVG + CSV – ${withPhoto} mit Foto`
+      )
+    } catch (err) {
+      toast.error("Steckbriefe fehlgeschlagen", {
+        description: (err as Error).message,
+      })
+    } finally {
+      setTplBusy(false)
     }
   }
 
@@ -370,7 +585,108 @@ export function ChartsPage({
             </Button>
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Badge variant="secondary">4</Badge> Steckbriefe (Vorlage)
+            </CardTitle>
+            <CardDescription>
+              Illustrator-Vorlage (SVG) hochladen → pro Person eine gefüllte
+              Doppelseite mit Chart + Foto. Ergebnis: 1 PDF pro Steckbrief im ZIP.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <Input
+              type="file"
+              accept=".svg,image/svg+xml"
+              className="h-9 text-sm"
+              onChange={(e) => onTemplateFile(e.target.files?.[0] ?? null)}
+            />
+            {templateName && (
+              <div className="truncate text-xs text-muted-foreground">
+                {templateName}
+              </div>
+            )}
+            <div className="flex items-center justify-between gap-3">
+              <Label className="text-sm" htmlFor="photo-source">
+                Fotoquelle
+              </Label>
+              <select
+                id="photo-source"
+                value={photoSource}
+                onChange={(e) =>
+                  setPhotoSource(e.target.value as "excel" | "upload")
+                }
+                className="h-8 w-40 rounded-md border bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              >
+                <option value="excel">Aus Excel</option>
+                <option value="upload">Hochladen</option>
+              </select>
+            </div>
+            {photoSource === "upload" && (
+              <div className="flex flex-col gap-2">
+                <Input
+                  type="file"
+                  accept="image/*,.heic,.heif"
+                  multiple
+                  className="h-9 text-sm"
+                  onChange={(e) => onPhotoFiles(e.target.files)}
+                />
+                <div className="text-xs text-muted-foreground">
+                  {uploadedFiles.length} Datei(en) – Dateiname = Nachname_Vorname
+                  (z. B. „Mustermann_Max.jpg“), Reihenfolge & Zweitnamen egal.
+                </div>
+                {parsed && uploadedFiles.length > 0 && (
+                  <PhotoAssign
+                    people={parsed.people}
+                    files={uploadedFiles}
+                    assignments={assignments}
+                    onAssign={(rowExcel, fileName) =>
+                      setAssignments((a) => {
+                        const next = { ...a }
+                        if (fileName) next[rowExcel] = fileName
+                        else delete next[rowExcel]
+                        return next
+                      })
+                    }
+                  />
+                )}
+              </div>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="justify-start"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <Settings className="size-4" /> Einstellungen (Mapping, Schrift,
+              Icons)
+            </Button>
+            <Button
+              size="lg"
+              onClick={exportTemplateZip}
+              disabled={!templateSvg || !charts.length || tplBusy}
+            >
+              {tplBusy ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <FileArchive />
+              )}
+              Steckbriefe (PDF + SVG + CSV) als ZIP
+            </Button>
+          </CardContent>
+        </Card>
       </div>
+
+      <TemplateSettings
+        open={settingsOpen}
+        config={tplConfig}
+        headers={parsed?.header ?? []}
+        defaultSizes={tplSizes}
+        onChange={setTplConfig}
+        onClose={() => setSettingsOpen(false)}
+      />
 
       {/* Vorschau */}
       <div className="flex flex-col gap-4">
@@ -457,6 +773,249 @@ function ColorRow({
           className="size-8 cursor-pointer rounded-md border bg-transparent p-0.5"
           aria-label={label}
         />
+      </div>
+    </div>
+  )
+}
+
+const SELECT_CLS =
+  "h-8 w-full rounded-md border bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+
+function TemplateSettings({
+  open,
+  config,
+  headers,
+  defaultSizes,
+  onChange,
+  onClose,
+}: {
+  open: boolean
+  config: TemplateConfig
+  headers: string[]
+  defaultSizes: Record<string, number>
+  onChange: (c: TemplateConfig) => void
+  onClose: () => void
+}) {
+  if (!open) return null
+  const update = (slug: string, patch: Partial<FieldSetting>) =>
+    onChange({
+      fields: { ...config.fields, [slug]: { ...config.fields[slug], ...patch } },
+    })
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-xl border bg-background shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <h3 className="text-sm font-semibold">
+            Steckbrief-Einstellungen (Mapping · Präfix · Schrift · Größe · Icons)
+          </h3>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={() => onChange(DEFAULT_TEMPLATE_CONFIG)}
+            >
+              Zurücksetzen
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              onClick={onClose}
+            >
+              <X className="size-4" />
+            </Button>
+          </div>
+        </div>
+
+        <div className="overflow-y-auto px-4 py-3">
+          <div className="grid grid-cols-[78px_minmax(0,1fr)_116px_100px_62px_84px] items-center gap-2 border-b pb-2 text-xs font-medium text-muted-foreground">
+            <span>Feld</span>
+            <span>Excel-Spalte</span>
+            <span>Präfix</span>
+            <span>Schnitt</span>
+            <span>Größe</span>
+            <span>Icon</span>
+          </div>
+          {Object.entries(config.fields).map(([slug, f]) => (
+            <div
+              key={slug}
+              className="grid grid-cols-[78px_minmax(0,1fr)_116px_100px_62px_84px] items-center gap-2 py-1.5"
+            >
+              <span className="truncate text-sm" title={f.label}>
+                {f.label}
+              </span>
+              {f.source === "column" ? (
+                <select
+                  className={SELECT_CLS}
+                  value={f.column ?? ""}
+                  onChange={(e) => update(slug, { column: e.target.value })}
+                >
+                  <option value="">—</option>
+                  {headers
+                    .filter((h) => h && h.trim() !== "")
+                    .map((h) => (
+                      <option key={h} value={h}>
+                        {h}
+                      </option>
+                    ))}
+                  {/* "-"-Spalte explizit anbieten */}
+                  {headers.some((h) => (h ?? "").trim() === "-") && (
+                    <option value="-">- (Spalte „-“)</option>
+                  )}
+                </select>
+              ) : (
+                <span className="truncate text-xs text-muted-foreground">
+                  {f.source === "firstname"
+                    ? "Name → Vorname"
+                    : f.source === "surname"
+                      ? "Name → Nachname"
+                      : "statischer Text"}
+                </span>
+              )}
+              {f.source !== "static" ? (
+                <input
+                  className={SELECT_CLS}
+                  type="text"
+                  value={f.prefix ?? ""}
+                  placeholder="—"
+                  title='Fester Text vor dem Wert, z. B. "Geburtsdatum: "'
+                  onChange={(e) => update(slug, { prefix: e.target.value })}
+                />
+              ) : (
+                <span />
+              )}
+              <select
+                className={SELECT_CLS}
+                value={f.weight}
+                onChange={(e) => update(slug, { weight: e.target.value })}
+              >
+                {FONT_WEIGHTS.map((w) => (
+                  <option key={w.value} value={w.value}>
+                    {w.label}
+                  </option>
+                ))}
+              </select>
+              <input
+                className={SELECT_CLS}
+                type="number"
+                min={4}
+                step={1}
+                value={f.fontSize ?? ""}
+                placeholder={
+                  defaultSizes[slug] != null ? String(defaultSizes[slug]) : "auto"
+                }
+                title="Schriftgröße in px (leer = Vorlagengröße, als Platzhalter angezeigt)"
+                onChange={(e) => {
+                  const n = parseFloat(e.target.value)
+                  update(slug, {
+                    fontSize: Number.isFinite(n) && n > 0 ? n : undefined,
+                  })
+                }}
+              />
+              {slug.startsWith("Q") ? (
+                <select
+                  className={SELECT_CLS}
+                  value={f.icon ?? ""}
+                  onChange={(e) => update(slug, { icon: e.target.value })}
+                >
+                  {ICON_OPTIONS.map((o) => (
+                    <option key={o.key} value={o.key}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span />
+              )}
+            </div>
+          ))}
+          <p className="pt-3 text-xs text-muted-foreground">
+            Größe leer = aus der Vorlage übernehmen. Präfix steht als fester Text
+            vor dem Wert (z. B. „Geburtsdatum: “). Einstellungen werden im Browser
+            gespeichert.
+          </p>
+        </div>
+
+        <div className="border-t px-4 py-3 text-right">
+          <Button size="sm" onClick={onClose}>
+            Fertig
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Foto-Zuordnung: zeigt alle Personen mit ihrem (auto- oder manuell) zugeordneten
+// Bild. Nicht erkannte Personen lassen sich hier manuell einer hochgeladenen
+// Datei zuordnen; bereits anderweitig vergebene Dateien werden ausgeblendet.
+function PhotoAssign({
+  people,
+  files,
+  assignments,
+  onAssign,
+}: {
+  people: { name: string; rowExcel: number }[]
+  files: { fileName: string; dataUrl: string }[]
+  assignments: Record<number, string>
+  onAssign: (rowExcel: number, fileName: string) => void
+}) {
+  const hasPhoto = (rowExcel: number) => {
+    const fn = assignments[rowExcel]
+    return !!fn && files.some((f) => f.fileName === fn)
+  }
+  const assignedElsewhere = (fileName: string, rowExcel: number) =>
+    Object.entries(assignments).some(
+      ([r, fn]) => fn === fileName && Number(r) !== rowExcel
+    )
+  const withPhoto = people.filter((p) => hasPhoto(p.rowExcel)).length
+  return (
+    <div className="rounded-md border">
+      <div className="flex items-center justify-between border-b px-3 py-2 text-xs font-medium">
+        <span>Foto-Zuordnung</span>
+        <Badge variant={withPhoto === people.length ? "secondary" : "outline"}>
+          {withPhoto}/{people.length} mit Foto
+        </Badge>
+      </div>
+      <div className="max-h-56 overflow-y-auto">
+        {people.map((p) => {
+          const current = hasPhoto(p.rowExcel) ? assignments[p.rowExcel] : ""
+          return (
+            <div
+              key={p.rowExcel}
+              className="grid grid-cols-[1fr_minmax(0,170px)] items-center gap-2 border-b px-3 py-1.5 text-sm last:border-b-0"
+            >
+              <span
+                className={`truncate ${current ? "" : "text-muted-foreground"}`}
+                title={p.name}
+              >
+                {current ? "✓ " : "• "}
+                {p.name}
+              </span>
+              <select
+                className={SELECT_CLS}
+                value={current}
+                onChange={(e) => onAssign(p.rowExcel, e.target.value)}
+              >
+                <option value="">— kein Foto —</option>
+                {files
+                  .filter((f) => !assignedElsewhere(f.fileName, p.rowExcel))
+                  .map((f) => (
+                    <option key={f.fileName} value={f.fileName}>
+                      {f.fileName}
+                    </option>
+                  ))}
+              </select>
+            </div>
+          )
+        })}
       </div>
     </div>
   )

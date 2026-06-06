@@ -155,12 +155,15 @@ export function buildSvg(
     const leftAligned = cfg.labelAlign === "left"
     const textX = leftAligned ? labelLeftX : labelRightX
     const textAnchor = leftAligned ? "start" : "end"
+    // Alle Font-Eigenschaften als Inline-Style: so überschreibt eine umgebende
+    // CSS-Regel (z. B. im Steckbrief-Template) Font/Größe/Gewicht nicht – der
+    // Chart sieht eingebettet exakt aus wie im Standalone-Export.
     parts.push(
       `<text x="${f1(textX)}" y="${f1(
         baseline
-      )}" text-anchor="${textAnchor}" font-family="${cfg.fontFamily}" font-weight="${
-        cfg.fontWeight
-      }" font-size="${cfg.labelFontSize}" fill="${cfg.textColor}">${xmlEscape(
+      )}" text-anchor="${textAnchor}" fill="${cfg.textColor}" style="font-family:${
+        cfg.fontFamily
+      };font-size:${cfg.labelFontSize}px;font-weight:${cfg.fontWeight}">${xmlEscape(
         trait.label
       )}</text>`
     )
