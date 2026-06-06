@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node / Vite
+node_modules/
+dist/
+*.local
+.vite/
+
+# Generierte Charts (CLI)
+output/
+
+# Tooling-Caches
+.eslintcache
+node_modules/.tmp/
+
+# OS
+.DS_Store
+Thumbs.db
