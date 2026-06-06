@@ -317,6 +317,25 @@ function setWeight(el: Element, weight: string) {
     tspans[i].setAttribute("style", `font-weight:${weight}`)
 }
 
+const clamp01 = (n: number) => Math.max(0, Math.min(1, n))
+
+// Sichtbares Rechteck (in Elternkoordinaten) eines <image>-Platzhalters: x/y/
+// width/height kombiniert mit translate()+scale() aus dem transform.
+function imageFrameRect(el: Element): { x: number; y: number; w: number; h: number } {
+  const w0 = parseFloat(el.getAttribute("width") || "0")
+  const h0 = parseFloat(el.getAttribute("height") || "0")
+  const x0 = parseFloat(el.getAttribute("x") || "0")
+  const y0 = parseFloat(el.getAttribute("y") || "0")
+  const tr = el.getAttribute("transform") || ""
+  const t = tr.match(/translate\(\s*([-\d.]+)[\s,]+([-\d.]+)/)
+  const s = tr.match(/scale\(\s*([-\d.]+)(?:[\s,]+([-\d.]+))?/)
+  const tx = t ? parseFloat(t[1]) : 0
+  const ty = t ? parseFloat(t[2]) : 0
+  const sx = s ? parseFloat(s[1]) : 1
+  const sy = s ? (s[2] !== undefined ? parseFloat(s[2]) : parseFloat(s[1])) : 1
+  return { x: tx + x0 * sx, y: ty + y0 * sy, w: w0 * sx, h: h0 * sy }
+}
+
 function findTextByContent(svg: Element, target: string): Element | null {
   const texts = svg.getElementsByTagName("text")
   for (let i = 0; i < texts.length; i++) {
@@ -335,6 +354,10 @@ export type FillOptions = {
   name: string
   chartSvg: string
   photoDataUrl?: string | null
+  // Natürliche Bildmaße + Fokuspunkt (0..1) für frei wählbaren Bildausschnitt
+  // beim Fill. Ohne diese Angaben: zentriertes Cover (Fallback).
+  photoSize?: { w: number; h: number }
+  photoCrop?: { x: number; y: number }
   fontFaceCss: string
   config: TemplateConfig
 }
@@ -345,8 +368,18 @@ const ICON_GAP = 6
 const Q_INDENT = 12
 
 export function fillTemplate(opts: FillOptions): string {
-  const { templateSvg, header, row, name, chartSvg, photoDataUrl, fontFaceCss, config } =
-    opts
+  const {
+    templateSvg,
+    header,
+    row,
+    name,
+    chartSvg,
+    photoDataUrl,
+    photoSize,
+    photoCrop,
+    fontFaceCss,
+    config,
+  } = opts
   const doc = new DOMParser().parseFromString(templateSvg, "image/svg+xml")
   const svg = doc.documentElement
   const sizes = parseClassSizes(svg)
@@ -500,19 +533,40 @@ export function fillTemplate(opts: FillOptions): string {
     graph.parentNode?.removeChild(graph)
   }
 
-  // 4) Foto in "Image" (cover) – sonst Platzhalter entfernen.
+  // 4) Foto in "Image" (cover/Fill) – sonst Platzhalter entfernen.
   const image = svg.querySelector('[data-name="Image"]')
   if (image) {
-    if (photoDataUrl) {
-      image.setAttributeNS(
-        "http://www.w3.org/1999/xlink",
-        "xlink:href",
-        photoDataUrl
-      )
+    if (!photoDataUrl) {
+      image.parentNode?.removeChild(image)
+    } else if (photoSize && photoSize.w > 0 && photoSize.h > 0) {
+      // Frei wählbarer Bildausschnitt: verschachteltes <svg> als Rahmen (clippt
+      // automatisch), Bild exakt wie CSS object-fit:cover + object-position.
+      const fr = imageFrameRect(image)
+      const cx = clamp01(photoCrop?.x ?? 0.5)
+      const cy = clamp01(photoCrop?.y ?? 0.5)
+      const cover = Math.max(fr.w / photoSize.w, fr.h / photoSize.h)
+      const sw = photoSize.w * cover
+      const sh = photoSize.h * cover
+      const ns = doc.createElementNS(SVGNS, "svg")
+      ns.setAttribute("x", String(fr.x))
+      ns.setAttribute("y", String(fr.y))
+      ns.setAttribute("width", String(fr.w))
+      ns.setAttribute("height", String(fr.h))
+      const im = doc.createElementNS(SVGNS, "image")
+      im.setAttribute("x", String(cx * (fr.w - sw)))
+      im.setAttribute("y", String(cy * (fr.h - sh)))
+      im.setAttribute("width", String(sw))
+      im.setAttribute("height", String(sh))
+      im.setAttribute("preserveAspectRatio", "none")
+      im.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", photoDataUrl)
+      im.setAttribute("href", photoDataUrl)
+      ns.appendChild(im)
+      image.parentNode?.replaceChild(ns, image)
+    } else {
+      // Fallback ohne Maße: zentriertes Cover.
+      image.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", photoDataUrl)
       image.setAttribute("href", photoDataUrl)
       image.setAttribute("preserveAspectRatio", "xMidYMid slice")
-    } else {
-      image.parentNode?.removeChild(image)
     }
   }
 
@@ -534,6 +588,16 @@ export function templateFontSizes(templateSvg: string): Record<string, number> {
     if (el) out[slug] = Math.round(fontSizeOf(el, sizes) * 100) / 100
   }
   return out
+}
+
+// Seitenverhältnis (Breite/Höhe) des Foto-Rahmens – für die Vorschau-/Cropper-Box.
+export function templateImageAspect(templateSvg: string): number {
+  const doc = new DOMParser().parseFromString(templateSvg, "image/svg+xml")
+  const el = doc.documentElement.querySelector('[data-name="Image"]')
+  if (!el) return 1
+  const w = parseFloat(el.getAttribute("width") || "1")
+  const h = parseFloat(el.getAttribute("height") || "1")
+  return w > 0 && h > 0 ? w / h : 1
 }
 
 // Baut eine CSV der zusammengeführten Daten (eine Zeile pro Person, Spalten =

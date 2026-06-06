@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react"
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react"
 import {
   Download,
   FolderOpen,
@@ -52,6 +58,7 @@ import {
   configWeights,
   mergeConfig,
   templateFontSizes,
+  templateImageAspect,
   DEFAULT_TEMPLATE_CONFIG,
   ICON_OPTIONS,
   type TemplateConfig,
@@ -115,13 +122,17 @@ export function ChartsPage({
   const [templateSvg, setTemplateSvg] = useState<string | null>(null)
   const [templateName, setTemplateName] = useState("")
   const [photoSource, setPhotoSource] = useState<"excel" | "upload">("excel")
-  // Alle hochgeladenen Bilddateien (Name + Daten-URL).
+  // Alle hochgeladenen Bilddateien (Name + Daten-URL + natürliche Maße).
   const [uploadedFiles, setUploadedFiles] = useState<
-    { fileName: string; dataUrl: string }[]
+    { fileName: string; dataUrl: string; w: number; h: number }[]
   >([])
   // Zuordnung Person (Excel-Zeile) -> Dateiname; automatisch per Vorname_Nachname,
   // im Frontend manuell überschreibbar.
   const [assignments, setAssignments] = useState<Record<number, string>>({})
+  // Bildausschnitt (Fokuspunkt 0..1) je Person für das Fill; Default = Mitte.
+  const [crops, setCrops] = useState<Record<number, { x: number; y: number }>>(
+    {}
+  )
   const [tplBusy, setTplBusy] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [tplConfig, setTplConfig] = useState<TemplateConfig>(() => {
@@ -142,6 +153,11 @@ export function ChartsPage({
   // In der Vorlage verwendete Schriftgrößen je Feld (für die Platzhalter im Popup).
   const tplSizes = useMemo(
     () => (templateSvg ? templateFontSizes(templateSvg) : {}),
+    [templateSvg]
+  )
+  // Seitenverhältnis des Foto-Rahmens (für die Cropper-Vorschau).
+  const tplAspect = useMemo(
+    () => (templateSvg ? templateImageAspect(templateSvg) : 1),
     [templateSvg]
   )
   // Aus dem Excel-Sheet extrahierte Eigenschafts-Beschriftungen – im Frontend
@@ -307,11 +323,29 @@ export function ChartsPage({
     Promise.all(
       Array.from(list).map(
         (f) =>
-          new Promise<{ fileName: string; dataUrl: string }>((res) => {
+          new Promise<{
+            fileName: string
+            dataUrl: string
+            w: number
+            h: number
+          }>((res) => {
             const reader = new FileReader()
-            reader.onload = () =>
-              res({ fileName: f.name, dataUrl: String(reader.result) })
-            reader.onerror = () => res({ fileName: f.name, dataUrl: "" })
+            reader.onload = () => {
+              const dataUrl = String(reader.result)
+              // Natürliche Maße bestimmen (für Bildausschnitt/Fill).
+              const img = new Image()
+              img.onload = () =>
+                res({
+                  fileName: f.name,
+                  dataUrl,
+                  w: img.naturalWidth,
+                  h: img.naturalHeight,
+                })
+              img.onerror = () => res({ fileName: f.name, dataUrl, w: 0, h: 0 })
+              img.src = dataUrl
+            }
+            reader.onerror = () =>
+              res({ fileName: f.name, dataUrl: "", w: 0, h: 0 })
             reader.readAsDataURL(f)
           })
       )
@@ -354,11 +388,14 @@ export function ChartsPage({
       const out: ExportFile[] = []
       for (let i = 0; i < parsed.people.length; i++) {
         const p = parsed.people[i]
+        const upFile =
+          photoSource === "upload"
+            ? uploadedFiles.find((f) => f.fileName === assignments[p.rowExcel])
+            : undefined
         const photo =
           photoSource === "excel"
             ? rowImages.get(p.rowExcel) ?? null
-            : uploadedFiles.find((f) => f.fileName === assignments[p.rowExcel])
-                ?.dataUrl ?? null
+            : upFile?.dataUrl ?? null
         if (photo) withPhoto++
         const svg = fillTemplate({
           templateSvg,
@@ -367,6 +404,8 @@ export function ChartsPage({
           name: p.name,
           chartSvg: charts[i].svg,
           photoDataUrl: photo,
+          photoSize: upFile && upFile.w > 0 ? { w: upFile.w, h: upFile.h } : undefined,
+          photoCrop: crops[p.rowExcel],
           fontFaceCss: css,
           config: tplConfig,
         })
@@ -642,6 +681,8 @@ export function ChartsPage({
                     people={parsed.people}
                     files={uploadedFiles}
                     assignments={assignments}
+                    crops={crops}
+                    aspect={tplAspect}
                     onAssign={(rowExcel, fileName) =>
                       setAssignments((a) => {
                         const next = { ...a }
@@ -649,6 +690,9 @@ export function ChartsPage({
                         else delete next[rowExcel]
                         return next
                       })
+                    }
+                    onCrop={(rowExcel, c) =>
+                      setCrops((m) => ({ ...m, [rowExcel]: c }))
                     }
                   />
                 )}
@@ -953,70 +997,147 @@ function TemplateSettings({
   )
 }
 
-// Foto-Zuordnung: zeigt alle Personen mit ihrem (auto- oder manuell) zugeordneten
-// Bild. Nicht erkannte Personen lassen sich hier manuell einer hochgeladenen
-// Datei zuordnen; bereits anderweitig vergebene Dateien werden ausgeblendet.
+// Foto-Zuordnung: zeigt jede Person mit Vorschau ihres (auto-/manuell) zugeordneten
+// Bildes. Nicht erkannte Personen lassen sich manuell einer hochgeladenen Datei
+// zuordnen (bereits vergebene werden ausgeblendet). Pro Foto kann der sichtbare
+// Bildausschnitt (Fokuspunkt fürs Fill) per Klick/Ziehen gewählt werden.
 function PhotoAssign({
   people,
   files,
   assignments,
+  crops,
+  aspect,
   onAssign,
+  onCrop,
 }: {
   people: { name: string; rowExcel: number }[]
-  files: { fileName: string; dataUrl: string }[]
+  files: { fileName: string; dataUrl: string; w: number; h: number }[]
   assignments: Record<number, string>
+  crops: Record<number, { x: number; y: number }>
+  aspect: number
   onAssign: (rowExcel: number, fileName: string) => void
+  onCrop: (rowExcel: number, c: { x: number; y: number }) => void
 }) {
-  const hasPhoto = (rowExcel: number) => {
+  const fileOf = (rowExcel: number) => {
     const fn = assignments[rowExcel]
-    return !!fn && files.some((f) => f.fileName === fn)
+    return fn ? files.find((f) => f.fileName === fn) : undefined
   }
   const assignedElsewhere = (fileName: string, rowExcel: number) =>
     Object.entries(assignments).some(
       ([r, fn]) => fn === fileName && Number(r) !== rowExcel
     )
-  const withPhoto = people.filter((p) => hasPhoto(p.rowExcel)).length
+  const withPhoto = people.filter((p) => fileOf(p.rowExcel)).length
   return (
     <div className="rounded-md border">
       <div className="flex items-center justify-between border-b px-3 py-2 text-xs font-medium">
-        <span>Foto-Zuordnung</span>
+        <span>Foto-Zuordnung &amp; Bildausschnitt</span>
         <Badge variant={withPhoto === people.length ? "secondary" : "outline"}>
           {withPhoto}/{people.length} mit Foto
         </Badge>
       </div>
-      <div className="max-h-56 overflow-y-auto">
+      <div className="max-h-72 overflow-y-auto">
         {people.map((p) => {
-          const current = hasPhoto(p.rowExcel) ? assignments[p.rowExcel] : ""
+          const f = fileOf(p.rowExcel)
+          const current = f?.fileName ?? ""
           return (
             <div
               key={p.rowExcel}
-              className="grid grid-cols-[1fr_minmax(0,170px)] items-center gap-2 border-b px-3 py-1.5 text-sm last:border-b-0"
+              className="flex items-center gap-2 border-b px-3 py-2 last:border-b-0"
             >
-              <span
-                className={`truncate ${current ? "" : "text-muted-foreground"}`}
-                title={p.name}
-              >
-                {current ? "✓ " : "• "}
-                {p.name}
-              </span>
-              <select
-                className={SELECT_CLS}
-                value={current}
-                onChange={(e) => onAssign(p.rowExcel, e.target.value)}
-              >
-                <option value="">— kein Foto —</option>
-                {files
-                  .filter((f) => !assignedElsewhere(f.fileName, p.rowExcel))
-                  .map((f) => (
-                    <option key={f.fileName} value={f.fileName}>
-                      {f.fileName}
-                    </option>
-                  ))}
-              </select>
+              {f ? (
+                <CropBox
+                  src={f.dataUrl}
+                  aspect={aspect}
+                  value={crops[p.rowExcel] ?? { x: 0.5, y: 0.5 }}
+                  onChange={(c) => onCrop(p.rowExcel, c)}
+                />
+              ) : (
+                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded border border-dashed text-[10px] text-muted-foreground">
+                  kein
+                </div>
+              )}
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <span
+                  className={`truncate text-sm ${current ? "" : "text-muted-foreground"}`}
+                  title={p.name}
+                >
+                  {current ? "✓ " : "• "}
+                  {p.name}
+                </span>
+                <select
+                  className={SELECT_CLS}
+                  value={current}
+                  onChange={(e) => onAssign(p.rowExcel, e.target.value)}
+                >
+                  <option value="">— kein Foto —</option>
+                  {files
+                    .filter((x) => !assignedElsewhere(x.fileName, p.rowExcel))
+                    .map((x) => (
+                      <option key={x.fileName} value={x.fileName}>
+                        {x.fileName}
+                      </option>
+                    ))}
+                </select>
+              </div>
             </div>
           )
         })}
       </div>
+      <div className="border-t px-3 py-2 text-[11px] text-muted-foreground">
+        Tipp: In der Vorschau klicken/ziehen, um den sichtbaren Ausschnitt (Fill)
+        festzulegen.
+      </div>
+    </div>
+  )
+}
+
+// Cropper-Vorschau im Rahmen-Seitenverhältnis: zeigt das Bild als Cover und lässt
+// den Fokuspunkt (object-position 0..1) per Klick/Ziehen wählen. Entspricht 1:1
+// dem späteren Fill im SVG.
+function CropBox({
+  src,
+  aspect,
+  value,
+  onChange,
+}: {
+  src: string
+  aspect: number
+  value: { x: number; y: number }
+  onChange: (c: { x: number; y: number }) => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const dragging = useRef(false)
+  const apply = (clientX: number, clientY: number) => {
+    const el = ref.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    onChange({
+      x: Math.max(0, Math.min(1, (clientX - r.left) / r.width)),
+      y: Math.max(0, Math.min(1, (clientY - r.top) / r.height)),
+    })
+  }
+  const W = 56
+  return (
+    <div
+      ref={ref}
+      className="relative shrink-0 cursor-crosshair overflow-hidden rounded border bg-muted"
+      style={{ width: W, height: Math.round(W / (aspect || 1)) }}
+      title="Klicken/Ziehen, um den sichtbaren Bildausschnitt zu wählen"
+      onMouseDown={(e) => {
+        dragging.current = true
+        apply(e.clientX, e.clientY)
+      }}
+      onMouseMove={(e) => dragging.current && apply(e.clientX, e.clientY)}
+      onMouseUp={() => (dragging.current = false)}
+      onMouseLeave={() => (dragging.current = false)}
+    >
+      <img
+        src={src}
+        draggable={false}
+        alt=""
+        className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+        style={{ objectPosition: `${value.x * 100}% ${value.y * 100}%` }}
+      />
     </div>
   )
 }

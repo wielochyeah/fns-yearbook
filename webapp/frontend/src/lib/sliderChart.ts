@@ -31,7 +31,7 @@ export type ChartConfig = {
 }
 
 export const DEFAULT_CONFIG: ChartConfig = {
-  barColor: "#8B99AD",
+  barColor: "#EBEBEB",
   markerColor: "#E72585",
   textColor: "#000000",
   bgColor: "#FFFFFF",
