@@ -12,6 +12,7 @@ import {
   FileSpreadsheet,
   Loader2,
   Settings,
+  Crop,
   X,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -999,8 +1000,8 @@ function TemplateSettings({
 
 // Foto-Zuordnung: zeigt jede Person mit Vorschau ihres (auto-/manuell) zugeordneten
 // Bildes. Nicht erkannte Personen lassen sich manuell einer hochgeladenen Datei
-// zuordnen (bereits vergebene werden ausgeblendet). Pro Foto kann der sichtbare
-// Bildausschnitt (Fokuspunkt fürs Fill) per Klick/Ziehen gewählt werden.
+// zuordnen (bereits vergebene werden ausgeblendet). Über das Crop-Icon öffnet sich
+// eine große Ansicht zum komfortablen Wählen des sichtbaren Ausschnitts.
 function PhotoAssign({
   people,
   files,
@@ -1018,6 +1019,7 @@ function PhotoAssign({
   onAssign: (rowExcel: number, fileName: string) => void
   onCrop: (rowExcel: number, c: { x: number; y: number }) => void
 }) {
+  const [editRow, setEditRow] = useState<number | null>(null)
   const fileOf = (rowExcel: number) => {
     const fn = assignments[rowExcel]
     return fn ? files.find((f) => f.fileName === fn) : undefined
@@ -1027,6 +1029,11 @@ function PhotoAssign({
       ([r, fn]) => fn === fileName && Number(r) !== rowExcel
     )
   const withPhoto = people.filter((p) => fileOf(p.rowExcel)).length
+  const editFile = editRow != null ? fileOf(editRow) : undefined
+  const editPerson =
+    editRow != null ? people.find((p) => p.rowExcel === editRow) : undefined
+  const W = 56
+  const H = Math.round(W / (aspect || 1))
   return (
     <div className="rounded-md border">
       <div className="flex items-center justify-between border-b px-3 py-2 text-xs font-medium">
@@ -1039,20 +1046,38 @@ function PhotoAssign({
         {people.map((p) => {
           const f = fileOf(p.rowExcel)
           const current = f?.fileName ?? ""
+          const crop = crops[p.rowExcel] ?? { x: 0.5, y: 0.5 }
           return (
             <div
               key={p.rowExcel}
               className="flex items-center gap-2 border-b px-3 py-2 last:border-b-0"
             >
               {f ? (
-                <CropBox
-                  src={f.dataUrl}
-                  aspect={aspect}
-                  value={crops[p.rowExcel] ?? { x: 0.5, y: 0.5 }}
-                  onChange={(c) => onCrop(p.rowExcel, c)}
-                />
+                <button
+                  type="button"
+                  onClick={() => setEditRow(p.rowExcel)}
+                  title="Bildausschnitt wählen"
+                  className="group relative shrink-0 overflow-hidden rounded border bg-muted"
+                  style={{ width: W, height: H }}
+                >
+                  <img
+                    src={f.dataUrl}
+                    alt=""
+                    draggable={false}
+                    className="h-full w-full object-cover"
+                    style={{
+                      objectPosition: `${crop.x * 100}% ${crop.y * 100}%`,
+                    }}
+                  />
+                  <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition group-hover:bg-black/35 group-hover:opacity-100">
+                    <Crop className="size-4" />
+                  </span>
+                </button>
               ) : (
-                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded border border-dashed text-[10px] text-muted-foreground">
+                <div
+                  className="flex shrink-0 items-center justify-center rounded border border-dashed text-[10px] text-muted-foreground"
+                  style={{ width: W, height: H }}
+                >
                   kein
                 </div>
               )}
@@ -1064,80 +1089,170 @@ function PhotoAssign({
                   {current ? "✓ " : "• "}
                   {p.name}
                 </span>
-                <select
-                  className={SELECT_CLS}
-                  value={current}
-                  onChange={(e) => onAssign(p.rowExcel, e.target.value)}
-                >
-                  <option value="">— kein Foto —</option>
-                  {files
-                    .filter((x) => !assignedElsewhere(x.fileName, p.rowExcel))
-                    .map((x) => (
-                      <option key={x.fileName} value={x.fileName}>
-                        {x.fileName}
-                      </option>
-                    ))}
-                </select>
+                <div className="flex items-center gap-1.5">
+                  <select
+                    className={SELECT_CLS}
+                    value={current}
+                    onChange={(e) => onAssign(p.rowExcel, e.target.value)}
+                  >
+                    <option value="">— kein Foto —</option>
+                    {files
+                      .filter((x) => !assignedElsewhere(x.fileName, p.rowExcel))
+                      .map((x) => (
+                        <option key={x.fileName} value={x.fileName}>
+                          {x.fileName}
+                        </option>
+                      ))}
+                  </select>
+                  {f && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="size-8 shrink-0"
+                      title="Bildausschnitt wählen"
+                      onClick={() => setEditRow(p.rowExcel)}
+                    >
+                      <Crop className="size-4" />
+                    </Button>
+                  )}
+                </div>
               </div>
             </div>
           )
         })}
       </div>
-      <div className="border-t px-3 py-2 text-[11px] text-muted-foreground">
-        Tipp: In der Vorschau klicken/ziehen, um den sichtbaren Ausschnitt (Fill)
-        festzulegen.
-      </div>
+      {editRow != null && editFile && editFile.w > 0 && (
+        <CropModal
+          src={editFile.dataUrl}
+          imgW={editFile.w}
+          imgH={editFile.h}
+          aspect={aspect}
+          title={editPerson?.name ?? ""}
+          value={crops[editRow] ?? { x: 0.5, y: 0.5 }}
+          onChange={(c) => onCrop(editRow, c)}
+          onClose={() => setEditRow(null)}
+        />
+      )}
     </div>
   )
 }
 
-// Cropper-Vorschau im Rahmen-Seitenverhältnis: zeigt das Bild als Cover und lässt
-// den Fokuspunkt (object-position 0..1) per Klick/Ziehen wählen. Entspricht 1:1
-// dem späteren Fill im SVG.
-function CropBox({
+// Große Ansicht zum Wählen des sichtbaren Bildausschnitts. Zeigt das ganze Foto;
+// das Auswahlrechteck (im Rahmen-Seitenverhältnis, Cover-Größe) lässt sich per
+// Klick/Ziehen positionieren, der Rest wird abgedunkelt. Der Fokuspunkt (0..1)
+// entspricht 1:1 dem späteren Fill im SVG.
+function CropModal({
   src,
+  imgW,
+  imgH,
   aspect,
+  title,
   value,
   onChange,
+  onClose,
 }: {
   src: string
+  imgW: number
+  imgH: number
   aspect: number
+  title: string
   value: { x: number; y: number }
   onChange: (c: { x: number; y: number }) => void
+  onClose: () => void
 }) {
-  const ref = useRef<HTMLDivElement>(null)
+  const areaRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
+  const ds = Math.min(560 / imgW, 460 / imgH)
+  const dispW = imgW * ds
+  const dispH = imgH * ds
+  // Sichtbare Region (Bildpixel) = größtes Rechteck im Rahmen-Seitenverhältnis.
+  const imgAspect = imgW / imgH
+  const vw = imgAspect > aspect ? imgH * aspect : imgW
+  const vh = imgAspect > aspect ? imgH : imgW / aspect
+  const denomX = imgW - vw
+  const denomY = imgH - vh
+  const cx = Math.max(0, Math.min(1, value?.x ?? 0.5))
+  const cy = Math.max(0, Math.min(1, value?.y ?? 0.5))
   const apply = (clientX: number, clientY: number) => {
-    const el = ref.current
-    if (!el) return
-    const r = el.getBoundingClientRect()
+    const r = areaRef.current?.getBoundingClientRect()
+    if (!r) return
+    const mx = (clientX - r.left) / ds
+    const my = (clientY - r.top) / ds
+    const left = Math.max(0, Math.min(denomX, mx - vw / 2))
+    const top = Math.max(0, Math.min(denomY, my - vh / 2))
     onChange({
-      x: Math.max(0, Math.min(1, (clientX - r.left) / r.width)),
-      y: Math.max(0, Math.min(1, (clientY - r.top) / r.height)),
+      x: denomX > 0.5 ? left / denomX : 0.5,
+      y: denomY > 0.5 ? top / denomY : 0.5,
     })
   }
-  const W = 56
   return (
     <div
-      ref={ref}
-      className="relative shrink-0 cursor-crosshair overflow-hidden rounded border bg-muted"
-      style={{ width: W, height: Math.round(W / (aspect || 1)) }}
-      title="Klicken/Ziehen, um den sichtbaren Bildausschnitt zu wählen"
-      onMouseDown={(e) => {
-        dragging.current = true
-        apply(e.clientX, e.clientY)
-      }}
-      onMouseMove={(e) => dragging.current && apply(e.clientX, e.clientY)}
-      onMouseUp={() => (dragging.current = false)}
-      onMouseLeave={() => (dragging.current = false)}
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
     >
-      <img
-        src={src}
-        draggable={false}
-        alt=""
-        className="pointer-events-none absolute inset-0 h-full w-full object-cover"
-        style={{ objectPosition: `${value.x * 100}% ${value.y * 100}%` }}
-      />
+      <div
+        className="flex max-h-[90vh] flex-col rounded-xl border bg-background shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <h3 className="truncate text-sm font-semibold">
+            Bildausschnitt{title ? ` – ${title}` : ""}
+          </h3>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7"
+            onClick={onClose}
+          >
+            <X className="size-4" />
+          </Button>
+        </div>
+        <div className="p-4">
+          <div
+            ref={areaRef}
+            className="relative mx-auto cursor-crosshair select-none overflow-hidden rounded"
+            style={{ width: dispW, height: dispH }}
+            onMouseDown={(e) => {
+              dragging.current = true
+              apply(e.clientX, e.clientY)
+            }}
+            onMouseMove={(e) => dragging.current && apply(e.clientX, e.clientY)}
+            onMouseUp={() => (dragging.current = false)}
+            onMouseLeave={() => (dragging.current = false)}
+          >
+            <img
+              src={src}
+              alt=""
+              draggable={false}
+              className="pointer-events-none block h-full w-full object-contain"
+            />
+            <div
+              className="pointer-events-none absolute border-2 border-white"
+              style={{
+                left: ds * cx * denomX,
+                top: ds * cy * denomY,
+                width: ds * vw,
+                height: ds * vh,
+                boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)",
+              }}
+            >
+              <div className="absolute left-1/3 top-0 h-full w-px bg-white/40" />
+              <div className="absolute left-2/3 top-0 h-full w-px bg-white/40" />
+              <div className="absolute left-0 top-1/3 h-px w-full bg-white/40" />
+              <div className="absolute left-0 top-2/3 h-px w-full bg-white/40" />
+            </div>
+          </div>
+          <p className="pt-3 text-center text-xs text-muted-foreground">
+            Klicken oder ziehen, um den sichtbaren Ausschnitt zu positionieren.
+          </p>
+        </div>
+        <div className="border-t px-4 py-3 text-right">
+          <Button size="sm" onClick={onClose}>
+            Fertig
+          </Button>
+        </div>
+      </div>
     </div>
   )
 }
