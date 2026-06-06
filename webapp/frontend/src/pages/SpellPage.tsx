@@ -156,7 +156,8 @@ export function SpellPage({
               <Badge variant="secondary">2</Badge> Prüfen
             </CardTitle>
             <CardDescription>
-              Echtes Hunspell (de) – versteht zusammengesetzte Wörter.
+              Hunspell (de + en) – englische Wörter und Abkürzungen werden nicht
+              als Fehler gewertet.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">

@@ -74,8 +74,22 @@ const MISC = [
   "naumann", "freiheit.org",
 ]
 
+// Gültige deutsche Wörter (v. a. Komposita/Ableitungen), die igerman98 nicht
+// kennt und sonst als Fehler markiert würden.
+const GERMAN_GAPS = [
+  "diversität", "weitsicht", "weltsicht", "direktheit", "richtungsweisend",
+  "herausschmecken", "zentimeterweise", "millimeterweise", "meterweise",
+  "entbürokratisierung", "kapitalgedeckt", "kapitalgedecktes", "aufzusaugen",
+  "leihmutterschaft", "jugendbeirat", "jugendbeirates", "auslandssemester",
+  "auslandsmöglichkeiten", "interrailtickets", "wegklicken", "zukunftsorientiert",
+]
+
 export const CURATED_ALLOW: ReadonlySet<string> = new Set(
-  [...COUNTRIES, ...NATIONALITIES, ...CONTINENTS_REGIONS, ...MISC].map((w) =>
-    w.toLowerCase()
-  )
+  [
+    ...COUNTRIES,
+    ...NATIONALITIES,
+    ...CONTINENTS_REGIONS,
+    ...MISC,
+    ...GERMAN_GAPS,
+  ].map((w) => w.toLowerCase())
 )

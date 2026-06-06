@@ -7,9 +7,16 @@ import { loadModule, type Hunspell } from "hunspell-asm"
 import { CURATED_ALLOW } from "./allowlist"
 import type { ParsedWorkbook, CellValue } from "./excel"
 
-// igerman98-Wörterbuch als statische Assets unter public/.
-const AFF_URL = "/dict/de.aff"
-const DIC_URL = "/dict/de.dic"
+// Wörterbücher als statische Assets unter public/. Deutsch nutzt das große
+// frami-Wörterbuch (LibreOffice, ~258k Einträge, UTF-8) – deutlich mehr Wörter
+// als die igerman98-Basis. Englisch dient nur als Zweitprüfung, damit englische
+// Wörter in Freitext/Titeln nicht als Fehler markiert werden.
+// Eigener Dateiname (de-frami), damit der immutable-Cache aus vercel.json nicht
+// die alte, kleinere Datei ausliefert.
+const DE_AFF_URL = "/dict/de-frami.aff"
+const DE_DIC_URL = "/dict/de-frami.dic"
+const EN_AFF_URL = "/dict/en.aff"
+const EN_DIC_URL = "/dict/en.dic"
 
 export type SpellError = {
   rowExcel: number
@@ -31,30 +38,45 @@ export type SpellResult = {
 
 const MAX_ERRORS = 2000
 
-// kurze Domänen-/Abkürzungswörter
+// kurze Domänen- und Standard-Abkürzungswörter sowie häufige Umgangsformen
 const BUILTIN_ALLOW = new Set(
   [
+    // Domäne / allgemein
     "fnf", "dsgvo", "sose", "wise", "diy", "svg", "url", "id", "idnr",
     "gmbh", "ggf", "bzw", "ca", "etc", "vs", "ok", "ngo", "eu", "usa",
+    // gängige deutsche Abkürzungen
+    "str", "nr", "tel", "usw", "vgl", "evtl", "inkl", "exkl", "sog", "bspw",
+    "zzgl", "bzgl", "zb", "ua", "dh", "uvm", "insb", "staatl", "ggfs",
+    // Umgangssprache / Interjektionen
+    "nem", "nen", "ner", "hmm", "ähm", "öhm", "joa", "naja",
   ].map((w) => w.toLowerCase())
 )
 
-let hunspellPromise: Promise<Hunspell> | null = null
+type Dictionaries = { de: Hunspell; en: Hunspell }
 
-export function loadDictionary(): Promise<Hunspell> {
-  if (!hunspellPromise) {
-    hunspellPromise = (async () => {
+let dictsPromise: Promise<Dictionaries> | null = null
+
+export function loadDictionary(): Promise<Dictionaries> {
+  if (!dictsPromise) {
+    dictsPromise = (async () => {
       const factory = await loadModule()
-      const [affBuf, dicBuf] = await Promise.all([
-        fetch(AFF_URL).then((r) => r.arrayBuffer()),
-        fetch(DIC_URL).then((r) => r.arrayBuffer()),
+      const fetchBuf = (url: string) =>
+        fetch(url).then((r) => r.arrayBuffer())
+      const [deAff, deDic, enAff, enDic] = await Promise.all([
+        fetchBuf(DE_AFF_URL),
+        fetchBuf(DE_DIC_URL),
+        fetchBuf(EN_AFF_URL),
+        fetchBuf(EN_DIC_URL),
       ])
-      const affPath = factory.mountBuffer(new Uint8Array(affBuf), "de.aff")
-      const dicPath = factory.mountBuffer(new Uint8Array(dicBuf), "de.dic")
-      return factory.create(affPath, dicPath)
+      const mount = (buf: ArrayBuffer, name: string) =>
+        factory.mountBuffer(new Uint8Array(buf), name)
+      return {
+        de: factory.create(mount(deAff, "de.aff"), mount(deDic, "de.dic")),
+        en: factory.create(mount(enAff, "en.aff"), mount(enDic, "en.dic")),
+      }
     })()
   }
-  return hunspellPromise
+  return dictsPromise
 }
 
 // Ganze Zelle überspringen, wenn es offensichtlich keine Prosa ist
@@ -81,7 +103,7 @@ export async function checkWorkbook(
   parsed: ParsedWorkbook,
   ignore: Set<string> = new Set()
 ): Promise<SpellResult> {
-  const hun = await loadDictionary()
+  const { de, en } = await loadDictionary()
 
   // Allowlist: eingebaut + kuratiert + Personennamen + Kopfzeilen + Ignorierte
   const allow = new Set<string>(BUILTIN_ALLOW)
@@ -99,7 +121,7 @@ export async function checkWorkbook(
     const key = word.toLowerCase()
     let s = suggestCache.get(key)
     if (!s) {
-      s = hun.suggest(word).slice(0, 6)
+      s = de.suggest(word).slice(0, 6)
       suggestCache.set(key, s)
     }
     return s
@@ -132,8 +154,23 @@ export async function checkWorkbook(
         const offset = m.index ?? 0
         if (isSkippableToken(word)) continue
         if (allow.has(word.toLowerCase())) continue
+
+        // Abkürzungen / Trunkierungen nicht als Fehler werten:
+        const after = text.slice(offset + word.length)
+        // hängender Bindestrich (Ergänzungsstrich): "Kommunikations- und …"
+        if (/^-(\s|$)/.test(after)) continue
+        // Wort direkt gefolgt von "." – nur überspringen, wenn danach KEIN
+        // Satzanfang steht (Ziffer/Komma/Klammer oder Kleinbuchstabe →
+        // Abkürzung wie „Bergstr. 3", „Leihmuttersch.,"). Großbuchstabe oder
+        // Satzende danach bleibt prüfbar (echtes Satzende).
+        if (after.startsWith(".")) {
+          const next = after.slice(1).replace(/^\s+/, "").charAt(0)
+          if (next && (/[0-9,;)]/.test(next) || /\p{Ll}/u.test(next))) continue
+        }
+
         wordsChecked++
-        if (hun.spell(word)) continue
+        // Fehler nur, wenn weder Deutsch noch Englisch das Wort kennen.
+        if (de.spell(word) || en.spell(word)) continue
 
         errors.push({
           rowExcel,

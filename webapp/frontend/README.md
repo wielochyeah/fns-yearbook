@@ -56,11 +56,19 @@ npm run preview  # dist lokal testen
 - Excel-Parsing: SheetJS (`xlsx`), client-seitig.
 - SVG-Erzeugung: `src/lib/sliderChart.ts` (Portierung aus `slider_chart.py`),
   Label-Breite per Canvas gemessen.
-- Rechtschreibung: `src/lib/spellcheck.ts` (hunspell-asm + `public/dict/de.*`).
-  Das Wörterbuch stammt aus dem npm-Paket `dictionary-de` (igerman98) und liegt
-  als statisches Asset unter `public/dict/`.
-- `vite.config.ts` enthält ein kleines Plugin, das in `hunspell-asm` /
-  `emscripten-wasm-loader` „Namespace-als-Funktion“-Importe (nanoid + Emscripten-
-  Factory) patcht – sonst bricht das Browser-Bundle (Vite 8/rolldown).
+- Rechtschreibung: `src/lib/spellcheck.ts` (hunspell-asm). Statische Wörterbücher
+  unter `public/dict/`:
+  - Deutsch: `de-frami.*` – das große **frami**-Wörterbuch (LibreOffice,
+    ~258k Einträge), aus ISO8859-1 nach UTF-8 konvertiert (`SET UTF-8`), weil
+    hunspell-asm UTF-8 erwartet. Deutlich mehr Wörter als die igerman98-Basis.
+  - Englisch: `en.*` (`dictionary-en`) als **Zweitprüfung** – ein Wort gilt nur
+    als Fehler, wenn es weder DE noch EN kennt (englische Titel/Namen).
+  - Eigener Dateiname `de-frami` (statt `de`), damit der immutable-Cache aus
+    `vercel.json` beim Wörterbuch-Wechsel nicht die alte Datei ausliefert.
+- `vite.config.ts` enthält ein kleines Plugin, das `hunspell-asm` /
+  `emscripten-wasm-loader` patcht: „Namespace-als-Funktion“-Importe (nanoid),
+  den CJS-`getroot`-Import sowie den fehlenden ESM-Default-Export des
+  Emscripten-Moduls – sonst bricht das Browser-Bundle bzw. das Dev-ESM-Linking
+  (Vite 8/rolldown).
 - `?demo=1` lädt Beispieldaten (Charts), `?demo=spell` zusätzlich mit
   automatischer Rechtschreibprüfung.
