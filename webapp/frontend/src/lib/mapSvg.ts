@@ -111,6 +111,8 @@ function lerpColor(a: string, b: string, t: number): string {
 }
 
 // Füllfarbe einer Region: expliziter Override > Farbabstufung > Standardfarbe.
+// Bei ungültigen Gradient-Endfarben (z. B. "none") fällt es auf mapColor zurück,
+// statt still einen flachen/unsichtbaren Verlauf zu erzeugen.
 function regionFill(
   id: string,
   counts: Record<string, number>,
@@ -118,11 +120,35 @@ function regionFill(
   max: number
 ): string {
   if (s.stateColors[id]) return s.stateColors[id]
-  if (s.gradient) {
-    const v = Number(counts[id]) || 0
+  if (s.gradient && hexToRgb(s.gradientLow) && hexToRgb(s.gradientHigh)) {
+    const v = Math.max(0, Number(counts[id]) || 0)
     return lerpColor(s.gradientLow, s.gradientHigh, max > 0 ? v / max : 0)
   }
   return s.mapColor
+}
+
+// Entschärft Farb-/Schriftwerte, die in SVG-Attribute geschrieben werden
+// (verhindert Ausbruch aus dem Attribut bei Freitext-Eingaben).
+const attr = (v: string) => String(v ?? "").replace(/[<>"]/g, "")
+
+// Liefert eine Kopie des Styles mit entschärften Farb-/Schriftfeldern.
+function sanitizeColors(s: MapStyle): MapStyle {
+  const stateColors: Record<string, string> = {}
+  for (const [k, v] of Object.entries(s.stateColors)) stateColors[k] = attr(v)
+  return {
+    ...s,
+    mapColor: attr(s.mapColor),
+    borderColor: attr(s.borderColor),
+    outlineColor: attr(s.outlineColor),
+    bgColor: attr(s.bgColor),
+    gradientLow: attr(s.gradientLow),
+    gradientHigh: attr(s.gradientHigh),
+    fontColor: attr(s.fontColor),
+    fontFamily: attr(s.fontFamily),
+    axisColor: attr(s.axisColor),
+    gridColor: attr(s.gridColor),
+    stateColors,
+  }
 }
 
 const maxCount = (counts: Record<string, number>) =>
@@ -160,6 +186,7 @@ export function buildMapSvg(
   counts: Record<string, number>,
   s: MapStyle
 ): string {
+  s = sanitizeColors(s)
   // Genügend Rand, damit der Außenrand nicht abgeschnitten wird.
   const pad = Math.max(0, s.padding) + (s.outlineWidth > 0 ? s.outlineWidth : 0)
   const W = viewBox.w + 2 * pad
@@ -265,22 +292,22 @@ export function buildBarChartSvg(
   counts: Record<string, number>,
   s: MapStyle
 ): string {
-  const total = Object.values(counts).reduce((a, n) => a + (Number(n) || 0), 0)
+  s = sanitizeColors(s)
+  const total = Object.values(counts).reduce(
+    (a, n) => a + Math.max(0, Number(n) || 0),
+    0
+  )
   const disp = (count: number) =>
     s.valueMode === "percent" ? (total ? (count / total) * 100 : 0) : count
   const fmtVal = (count: number) =>
     s.valueMode === "percent"
       ? `${disp(count).toFixed(Math.max(0, s.decimals))}%`
       : String(count)
-  const fmtTick = (t: number) =>
-    s.valueMode === "percent"
-      ? `${t.toFixed(Math.max(0, s.decimals))}%`
-      : String(Math.round(t))
 
   let data = regions.map((r) => ({
     id: r.id,
     name: r.name,
-    count: Number(counts[r.id]) || 0,
+    count: Math.max(0, Number(counts[r.id]) || 0),
   }))
   if (s.hideZero) data = data.filter((d) => d.count > 0)
   if (s.barSort === "valueAsc") data.sort((a, b) => a.count - b.count)
@@ -323,6 +350,18 @@ export function buildBarChartSvg(
   const maxVal = data.reduce((m, d) => Math.max(m, disp(d.count)), 0)
   const axisMax = niceMax(maxVal)
   const ticks = axisTicks(axisMax, s.valueMode === "count")
+  // Tick-Nachkommastellen so wählen, dass benachbarte Prozent-Ticks nicht gleich
+  // formatiert werden (sonst „0%,0%,1%,1%…" bei kleinen Anteilen).
+  const tickStep = ticks.length > 1 ? ticks[1] - ticks[0] : axisMax || 1
+  const tickDec =
+    s.valueMode === "percent"
+      ? Math.max(
+          s.decimals,
+          tickStep > 0 && tickStep < 1 ? Math.ceil(-Math.log10(tickStep)) : 0
+        )
+      : 0
+  const fmtTick = (t: number) =>
+    s.valueMode === "percent" ? `${t.toFixed(tickDec)}%` : String(Math.round(t))
   const scale = (v: number) => (axisMax > 0 ? (v / axisMax) * 360 : 0)
   const thick = Math.max(12, fs * 1.4)
   const gap = thick * 0.6
@@ -344,7 +383,9 @@ export function buildBarChartSvg(
     const mBottom = s.showCategoryAxis ? longest * Math.SQRT1_2 + fs + 8 : 8
     const plotW = n * step
     const plotH = 360
-    open(pad * 2 + mLeft + plotW + 10, pad * 2 + mTop + plotH + mBottom)
+    // Rechter Rand auch für das (zentrierte) Wertelabel über dem letzten Balken.
+    const mRight = Math.max(10, s.showValues ? widestVal / 2 + 4 : 4)
+    open(pad * 2 + mLeft + plotW + mRight, pad * 2 + mTop + plotH + mBottom)
     parts.push(`<g transform="translate(${f1(pad + mLeft)} ${f1(pad + mTop)})">`)
     for (const t of ticks) {
       const y = plotH - scale(t)

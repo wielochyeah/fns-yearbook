@@ -80,10 +80,12 @@ export function SpellPage({
 
   const selectExcel = (f: File | null) => {
     setSource("excel")
+    setResult(null) // alte Treffer der vorherigen Quelle nicht stehen lassen
     onSelect(f)
   }
   const loadSampleExcel = () => {
     setSource("excel")
+    setResult(null)
     onLoadSample()
   }
 
@@ -204,7 +206,15 @@ export function SpellPage({
               <span className="h-px flex-1 bg-border" />
             </div>
 
-            <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-dashed px-3 py-2.5 text-sm hover:bg-muted/40">
+            <label
+              className="flex cursor-pointer items-center gap-3 rounded-lg border border-dashed px-3 py-2.5 text-sm hover:bg-muted/40"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault()
+                const f = e.dataTransfer.files?.[0]
+                if (f) void onPdf(f)
+              }}
+            >
               {pdfBusy ? (
                 <Loader2 className="size-4 shrink-0 animate-spin" />
               ) : (
@@ -332,6 +342,16 @@ export function SpellPage({
                 : "Wähle eine Excel-Datei oder ein PDF (oder lade die Beispieldaten)."
             }
           />
+        ) : result.wordsChecked === 0 ? (
+          <div className="flex min-h-[200px] flex-col items-center justify-center gap-3 rounded-xl border border-dashed text-center">
+            <AlertTriangle className="size-10 text-amber-500" />
+            <div className="max-w-xs text-sm text-muted-foreground">
+              Kein prüfbarer Text gefunden
+              {result.unit === "Seite"
+                ? " – vermutlich ein gescanntes Bild-PDF ohne Text-Layer."
+                : "."}
+            </div>
+          </div>
         ) : filtered.length === 0 ? (
           <div className="flex min-h-[200px] flex-col items-center justify-center gap-3 rounded-xl border border-dashed text-center">
             <CheckCircle2 className="size-10 text-emerald-500" />
@@ -421,8 +441,10 @@ function ErrorRow({ err, onIgnore }: { err: SpellError; onIgnore: () => void }) 
             <button
               key={s}
               onClick={() => {
-                void navigator.clipboard?.writeText(s)
-                toast.success(`„${s}“ kopiert`)
+                navigator.clipboard
+                  ?.writeText(s)
+                  .then(() => toast.success(`„${s}“ kopiert`))
+                  .catch(() => toast.error("Kopieren nicht möglich"))
               }}
             >
               <Badge variant="secondary" className="cursor-pointer">

@@ -177,7 +177,7 @@ export async function checkWorkbook(
       nameCell == null || String(nameCell).trim() === ""
         ? null
         : String(nameCell).trim()
-    const rowExcel = r + 2 // +1 Kopfzeile, +1 für 1-basiert
+    const rowExcel = parsed.rowExcels?.[r] ?? r + 2 // echte Excel-Zeile
 
     for (let c = 0; c < parsed.header.length; c++) {
       const raw: CellValue = row?.[c] ?? null

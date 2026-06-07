@@ -1,10 +1,11 @@
 import {
+  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
-  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react"
 import {
   Download,
@@ -170,6 +171,8 @@ export function ChartsPage({
   const [labels, setLabels] = useState<string[]>([])
 
   useEffect(() => {
+    // Editierbare Labels bei neuer Datei aus parsed übernehmen (bewusster Sync).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLabels(parsed?.traits ?? [])
   }, [parsed])
 
@@ -178,6 +181,8 @@ export function ChartsPage({
   const [excelImages, setExcelImages] = useState<Map<number, string>>(new Map())
   const [fontTick, setFontTick] = useState(0)
   useEffect(() => {
+    // Vorschau bei neuer Datei auf die erste Person zurücksetzen.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPreviewIdx(0)
   }, [parsed])
   // Fotos aus Excel einmalig extrahieren (für die Vorschau, wenn Quelle = Excel).
@@ -188,6 +193,7 @@ export function ChartsPage({
         .then((m) => !cancelled && setExcelImages(m))
         .catch(() => {})
     } else {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setExcelImages(new Map())
     }
     return () => {
@@ -207,6 +213,10 @@ export function ChartsPage({
     }
   }, [templateSvg, tplConfig])
 
+  // Schwergewichtige Vorschau (parst das ganze Template-SVG) niedriger
+  // priorisieren, damit Tippen in den Einstellungen / Crop-Ziehen flüssig bleibt.
+  const dTplConfig = useDeferredValue(tplConfig)
+  const dCrops = useDeferredValue(crops)
   const previewSteckbrief = useMemo(() => {
     if (!parsed || !templateSvg || !charts.length) return null
     const idx = Math.min(Math.max(0, previewIdx), parsed.people.length - 1)
@@ -227,15 +237,15 @@ export function ChartsPage({
         svg: fillTemplate({
           templateSvg,
           header: parsed.header,
-          row: parsed.rows[p.rowExcel - 2],
+          row: p.cells,
           name: p.name,
           chartSvg: charts[idx].svg,
           photoDataUrl: photo,
           photoSize:
             upFile && upFile.w > 0 ? { w: upFile.w, h: upFile.h } : undefined,
-          photoCrop: crops[p.rowExcel],
+          photoCrop: dCrops[p.rowExcel],
           fontFaceCss: "",
-          config: tplConfig,
+          config: dTplConfig,
         }),
       }
     } catch {
@@ -251,9 +261,9 @@ export function ChartsPage({
     uploadedFiles,
     assignments,
     excelImages,
-    crops,
+    dCrops,
     fontTick,
-    tplConfig,
+    dTplConfig,
   ])
 
   const labelsDirty =
@@ -453,6 +463,8 @@ export function ChartsPage({
   // hochgeladen), Auto-Zuordnung nachziehen.
   useEffect(() => {
     if (!parsed || !uploadedFiles.length) return
+    // autoAssign liefert prev unverändert, wenn nichts zuzuordnen ist (kein Loop).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setAssignments((prev) => autoAssign(uploadedFiles, prev))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [parsed, uploadedFiles])
@@ -488,7 +500,7 @@ export function ChartsPage({
         const svg = fillTemplate({
           templateSvg,
           header: parsed.header,
-          row: parsed.rows[p.rowExcel - 2],
+          row: p.cells,
           name: p.name,
           chartSvg: charts[i].svg,
           photoDataUrl: photo,
@@ -506,7 +518,7 @@ export function ChartsPage({
       const csv = buildMergeCsv({
         people: parsed.people.map((p) => ({
           name: p.name,
-          row: parsed.rows[p.rowExcel - 2],
+          row: p.cells,
         })),
         header: parsed.header,
         config: tplConfig,
@@ -1394,15 +1406,20 @@ function CropModal({
       y: clmp((clientY - b.top) / b.height, 0, 1),
     }
   }
-  const onDown =
-    (mode: "move" | "nw" | "ne" | "sw" | "se") =>
-    (e: ReactMouseEvent) => {
-      e.preventDefault()
-      e.stopPropagation()
-      const f = toFrac(e.clientX, e.clientY)
-      drag.current = { mode, sx: f.x, sy: f.y, rect: r }
-    }
-  const onMove = (e: ReactMouseEvent) => {
+  // Pointer-Capture: das Ziehen funktioniert auch, wenn der Zeiger die Fläche
+  // verlässt – pointerup wird trotzdem auf der Fläche empfangen (kein „hängendes"
+  // Dragging mehr, das ohne gedrückte Taste weiterzieht).
+  const startDrag = (
+    mode: "move" | "nw" | "ne" | "sw" | "se",
+    e: ReactPointerEvent
+  ) => {
+    e.preventDefault()
+    e.stopPropagation()
+    areaRef.current?.setPointerCapture?.(e.pointerId)
+    const f = toFrac(e.clientX, e.clientY)
+    drag.current = { mode, sx: f.x, sy: f.y, rect: r }
+  }
+  const onMove = (e: ReactPointerEvent) => {
     const d = drag.current
     if (!d) return
     const f = toFrac(e.clientX, e.clientY)
@@ -1446,9 +1463,8 @@ function CropModal({
             ref={areaRef}
             className="relative mx-auto select-none overflow-hidden rounded"
             style={{ width: dispW, height: dispH }}
-            onMouseMove={onMove}
-            onMouseUp={onUp}
-            onMouseLeave={onUp}
+            onPointerMove={onMove}
+            onPointerUp={onUp}
           >
             <img
               src={src}
@@ -1465,7 +1481,7 @@ function CropModal({
                 height: r.h * dispH,
                 boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)",
               }}
-              onMouseDown={onDown("move")}
+              onPointerDown={(e) => startDrag("move", e)}
             >
               <div className="pointer-events-none absolute left-1/3 top-0 h-full w-px bg-white/40" />
               <div className="pointer-events-none absolute left-2/3 top-0 h-full w-px bg-white/40" />
@@ -1474,22 +1490,22 @@ function CropModal({
               <span
                 className={HANDLE}
                 style={{ left: -7, top: -7, cursor: "nwse-resize" }}
-                onMouseDown={onDown("nw")}
+                onPointerDown={(e) => startDrag("nw", e)}
               />
               <span
                 className={HANDLE}
                 style={{ right: -7, top: -7, cursor: "nesw-resize" }}
-                onMouseDown={onDown("ne")}
+                onPointerDown={(e) => startDrag("ne", e)}
               />
               <span
                 className={HANDLE}
                 style={{ left: -7, bottom: -7, cursor: "nesw-resize" }}
-                onMouseDown={onDown("sw")}
+                onPointerDown={(e) => startDrag("sw", e)}
               />
               <span
                 className={HANDLE}
                 style={{ right: -7, bottom: -7, cursor: "nwse-resize" }}
-                onMouseDown={onDown("se")}
+                onPointerDown={(e) => startDrag("se", e)}
               />
             </div>
           </div>

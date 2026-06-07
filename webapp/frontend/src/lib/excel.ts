@@ -7,13 +7,15 @@ export type CellValue = string | number | boolean | null
 
 export type Person = {
   name: string
-  rowExcel: number // 1-basierte Excel-Zeilennummer
+  rowExcel: number // echte 1-basierte Excel-Zeilennummer (passt zu Bild-Ankern)
   values: (number | null)[]
+  cells: CellValue[] // Rohzeile dieser Person (entkoppelt von rows-Index)
 }
 
 export type ParsedWorkbook = {
   header: string[]
-  rows: CellValue[][] // Datenzeilen (ohne Kopfzeile)
+  rows: CellValue[][] // Datenzeilen (ohne Kopfzeile, ohne Leerzeilen)
+  rowExcels: number[] // echte 1-basierte Excel-Zeile je rows-Eintrag
   traits: string[] // erkannte Eigenschafts-Labels
   traitIdx: number[] // Spaltenindizes der Eigenschaften
   nameIdx: number
@@ -70,16 +72,32 @@ export async function parseFile(
   const ws = wb.Sheets[wb.SheetNames[0]]
   if (!ws) throw new Error("Das Excel-Sheet ist leer.")
 
+  // Leerzeilen BEHALTEN, damit die Zeilennummern den echten Excel-Zeilen (und
+  // damit den Bild-Ankern) entsprechen. Wir kompaktieren erst danach selbst.
   const grid = XLSX.utils.sheet_to_json<CellValue[]>(ws, {
     header: 1,
     raw: true,
-    blankrows: false,
+    blankrows: true,
     defval: null,
   })
-  if (grid.length === 0) throw new Error("Das Excel-Sheet ist leer.")
+  const isBlank = (r: CellValue[] | undefined) =>
+    !Array.isArray(r) || !r.some((c) => c != null && String(c).trim() !== "")
 
-  const header = (grid[0] ?? []).map((c) => (c == null ? "" : String(c).trim()))
-  const dataRows = grid.slice(1)
+  // Kopfzeile = erste nicht-leere Zeile.
+  const h0 = grid.findIndex((r) => !isBlank(r))
+  if (h0 < 0) throw new Error("Das Excel-Sheet ist leer.")
+
+  const header = (grid[h0] ?? []).map((c) => (c == null ? "" : String(c).trim()))
+
+  // Datenzeilen (ohne Leerzeilen) + parallele echte Excel-Zeilennummern.
+  const dataRows: CellValue[][] = []
+  const rowExcels: number[] = []
+  for (let g = h0 + 1; g < grid.length; g++) {
+    const r = grid[g] ?? []
+    if (isBlank(r)) continue
+    dataRows.push(r)
+    rowExcels.push(g + 1) // 1-basierte Excel-Zeile
+  }
 
   // Namensspalte (Fallback: erste Spalte)
   let nameIdx = resolveColumn(nameColumn, header)
@@ -122,10 +140,11 @@ export async function parseFile(
     if (nameCell == null || String(nameCell).trim() === "") return
     people.push({
       name: String(nameCell).trim(),
-      rowExcel: i + 2, // +1 Kopfzeile, +1 für 1-basiert
+      rowExcel: rowExcels[i], // echte Excel-Zeile (passt zu Bild-Ankern)
       values: traitIdx.map((c) => toNumberOrNull(row?.[c] ?? null)),
+      cells: row,
     })
   })
 
-  return { header, rows: dataRows, traits, traitIdx, nameIdx, people }
+  return { header, rows: dataRows, rowExcels, traits, traitIdx, nameIdx, people }
 }

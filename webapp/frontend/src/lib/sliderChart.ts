@@ -84,6 +84,19 @@ export function buildSvg(
   traits: Trait[],
   cfg: ChartConfig = DEFAULT_CONFIG
 ): string {
+  // Farb-/Schriftwerte werden in SVG-Attribute geschrieben (und per
+  // dangerouslySetInnerHTML gerendert) – Sonderzeichen entschärfen, damit
+  // Freitext-Eingaben nicht aus dem Attribut ausbrechen.
+  const A = (v: string) => String(v ?? "").replace(/[<>"]/g, "")
+  cfg = {
+    ...cfg,
+    barColor: A(cfg.barColor),
+    markerColor: A(cfg.markerColor),
+    textColor: A(cfg.textColor),
+    bgColor: A(cfg.bgColor),
+    fontFamily: A(cfg.fontFamily),
+    fontWeight: A(cfg.fontWeight),
+  }
   const n = traits.length
 
   const labelColW = traits.reduce(
@@ -183,15 +196,16 @@ export function sanitizeFilename(name: string): string {
 }
 
 export function assignFilenames(names: string[]): string[] {
-  const used = new Map<string, number>()
+  // Garantiert eindeutige Dateinamen (case-insensitiv), damit im ZIP / Ordner
+  // keine Datei eine andere überschreibt – auch wenn ein echter Name bereits der
+  // nummerierten Form entspricht (z. B. „Max" + „Max_1").
+  const used = new Set<string>()
   return names.map((name) => {
     const base = sanitizeFilename(name)
-    if (used.has(base)) {
-      const next = (used.get(base) ?? 0) + 1
-      used.set(base, next)
-      return `${base}_${next}.svg`
-    }
-    used.set(base, 0)
-    return `${base}.svg`
+    let candidate = `${base}.svg`
+    let n = 1
+    while (used.has(candidate.toLowerCase())) candidate = `${base}_${n++}.svg`
+    used.add(candidate.toLowerCase())
+    return candidate
   })
 }

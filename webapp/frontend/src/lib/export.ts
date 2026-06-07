@@ -57,8 +57,12 @@ function triggerDownload(blob: Blob, name: string): void {
   const a = document.createElement("a")
   a.href = url
   a.download = name
+  document.body.appendChild(a)
   a.click()
-  URL.revokeObjectURL(url)
+  a.remove()
+  // URL erst nach dem Start des Downloads freigeben – sofortiges revoke kann
+  // große Dateien (ZIP mit vielen PDFs) im Browser abschneiden.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 // Minimal-Typen für die File System Access API (nicht überall in lib.dom)

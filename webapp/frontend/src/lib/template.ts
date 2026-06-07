@@ -157,13 +157,16 @@ function norm(s: string): string {
 function findColIndex(header: string[], target: string): number {
   if (target === "-") return header.findIndex((h) => (h ?? "").trim() === "-")
   const t = norm(target)
-  let idx = header.findIndex((h) => norm(String(h ?? "")) === t)
-  if (idx >= 0) return idx
-  idx = header.findIndex((h) => {
+  const exact = header.findIndex((h) => norm(String(h ?? "")) === t)
+  if (exact >= 0) return exact
+  // Teilstring-Fallback nur, wenn er EINDEUTIG ist – sonst lieber kein Treffer,
+  // als ein Q/T-Feld an die falsche Spalte zu binden.
+  const cands: number[] = []
+  header.forEach((h, i) => {
     const n = norm(String(h ?? ""))
-    return n.length > 2 && (n.includes(t) || t.includes(n))
+    if (n.length > 2 && (n.includes(t) || t.includes(n))) cands.push(i)
   })
-  return idx
+  return cands.length === 1 ? cands[0] : -1
 }
 
 // --- Textmessung per Canvas (für Umbruch/Autofit) ------------------------- //
@@ -284,26 +287,86 @@ function setMultiLine(
   })
 }
 
-function translateOf(el: Element): { x: number; y: number } | null {
-  const m = (el.getAttribute("transform") || "").match(
-    /translate\(\s*([-\d.]+)[\s,]+([-\d.]+)/
+const NUM = "[-\\d.eE]+"
+
+// Liest Translation + Skalierung aus translate()/scale() ODER matrix(a b c d e f)
+// (Illustrator exportiert je nach Version das eine oder andere). Rotation/Skew
+// (b,c) werden für unsere Zwecke ignoriert. Null, wenn gar kein transform da ist.
+function parseTransform(
+  tr: string
+): { tx: number; ty: number; sx: number; sy: number } | null {
+  const m = tr.match(
+    new RegExp(
+      `matrix\\(\\s*(${NUM})[\\s,]+(${NUM})[\\s,]+(${NUM})[\\s,]+(${NUM})[\\s,]+(${NUM})[\\s,]+(${NUM})`
+    )
   )
-  return m ? { x: parseFloat(m[1]), y: parseFloat(m[2]) } : null
+  if (m)
+    return {
+      sx: parseFloat(m[1]),
+      sy: parseFloat(m[4]),
+      tx: parseFloat(m[5]),
+      ty: parseFloat(m[6]),
+    }
+  const t = tr.match(new RegExp(`translate\\(\\s*(${NUM})(?:[\\s,]+(${NUM}))?`))
+  const s = tr.match(new RegExp(`scale\\(\\s*(${NUM})(?:[\\s,]+(${NUM}))?`))
+  if (!t && !s) return null
+  const sx = s ? parseFloat(s[1]) : 1
+  return {
+    tx: t ? parseFloat(t[1]) : 0,
+    ty: t && t[2] !== undefined ? parseFloat(t[2]) : 0,
+    sx,
+    sy: s && s[2] !== undefined ? parseFloat(s[2]) : sx,
+  }
 }
 
+function translateOf(el: Element): { x: number; y: number } | null {
+  const p = parseTransform(el.getAttribute("transform") || "")
+  return p ? { x: p.tx, y: p.ty } : null
+}
+
+// Schreibt die x-Translation zurück – translate(...) und matrix(...) unterstützt.
 function setTranslateX(el: Element, x: number) {
   const tr = el.getAttribute("transform") || ""
-  const m = tr.match(/translate\(\s*([-\d.]+)([\s,]+)([-\d.]+)\s*\)/)
-  if (!m) return
-  el.setAttribute("transform", tr.replace(m[0], `translate(${x}${m[2]}${m[3]})`))
+  let m = tr.match(/translate\(\s*([-\d.]+)([\s,]+)([-\d.]+)\s*\)/)
+  if (m) {
+    el.setAttribute("transform", tr.replace(m[0], `translate(${x}${m[2]}${m[3]})`))
+    return
+  }
+  m = tr.match(/translate\(\s*([-\d.]+)\s*\)/)
+  if (m) {
+    el.setAttribute("transform", tr.replace(m[0], `translate(${x})`))
+    return
+  }
+  const mm = tr.match(
+    new RegExp(
+      `(matrix\\(\\s*(?:${NUM}[\\s,]+){4})(${NUM})([\\s,]+${NUM}\\s*\\))`
+    )
+  )
+  if (mm) el.setAttribute("transform", tr.replace(mm[0], `${mm[1]}${x}${mm[3]}`))
 }
 
+// Verschiebt die y-Translation um delta – translate(...) und matrix(...).
 function shiftTranslateY(el: Element, delta: number) {
   const tr = el.getAttribute("transform") || ""
-  const m = tr.match(/translate\(\s*([-\d.]+)([\s,]+)([-\d.]+)\s*\)/)
-  if (!m) return
-  const ny = parseFloat(m[3]) + delta
-  el.setAttribute("transform", tr.replace(m[0], `translate(${m[1]}${m[2]}${ny})`))
+  let m = tr.match(/translate\(\s*([-\d.]+)([\s,]+)([-\d.]+)\s*\)/)
+  if (m) {
+    const ny = parseFloat(m[3]) + delta
+    el.setAttribute("transform", tr.replace(m[0], `translate(${m[1]}${m[2]}${ny})`))
+    return
+  }
+  m = tr.match(/translate\(\s*([-\d.]+)\s*\)/)
+  if (m) {
+    el.setAttribute("transform", tr.replace(m[0], `translate(${m[1]} ${delta})`))
+    return
+  }
+  const mm = tr.match(
+    new RegExp(`(matrix\\(\\s*(?:${NUM}[\\s,]+){5})(${NUM})(\\s*\\))`)
+  )
+  if (mm)
+    el.setAttribute(
+      "transform",
+      tr.replace(mm[0], `${mm[1]}${parseFloat(mm[2]) + delta}${mm[3]}`)
+    )
 }
 
 // Setzt das Schriftgewicht als Inline-Style auf das <text>-Element UND jedes
@@ -326,14 +389,18 @@ function imageFrameRect(el: Element): { x: number; y: number; w: number; h: numb
   const h0 = parseFloat(el.getAttribute("height") || "0")
   const x0 = parseFloat(el.getAttribute("x") || "0")
   const y0 = parseFloat(el.getAttribute("y") || "0")
-  const tr = el.getAttribute("transform") || ""
-  const t = tr.match(/translate\(\s*([-\d.]+)[\s,]+([-\d.]+)/)
-  const s = tr.match(/scale\(\s*([-\d.]+)(?:[\s,]+([-\d.]+))?/)
-  const tx = t ? parseFloat(t[1]) : 0
-  const ty = t ? parseFloat(t[2]) : 0
-  const sx = s ? parseFloat(s[1]) : 1
-  const sy = s ? (s[2] !== undefined ? parseFloat(s[2]) : parseFloat(s[1])) : 1
-  return { x: tx + x0 * sx, y: ty + y0 * sy, w: w0 * sx, h: h0 * sy }
+  const p = parseTransform(el.getAttribute("transform") || "") || {
+    tx: 0,
+    ty: 0,
+    sx: 1,
+    sy: 1,
+  }
+  return {
+    x: p.tx + x0 * p.sx,
+    y: p.ty + y0 * p.sy,
+    w: w0 * p.sx,
+    h: h0 * p.sy,
+  }
 }
 
 function findTextByContent(svg: Element, target: string): Element | null {

@@ -17,12 +17,17 @@ export async function extractPdfText(file: File): Promise<string[]> {
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i)
       const content = await page.getTextContent()
-      const text = content.items
-        .map((it) => ("str" in it ? it.str : ""))
-        .join(" ")
-        .replace(/[ \t]+/g, " ")
-        .trim()
-      pages.push(text)
+      let text = ""
+      for (const it of content.items) {
+        if (!("str" in it)) continue
+        const eol = "hasEOL" in it && it.hasEOL
+        // Silbentrennung am Zeilenende ("Kommunika-\n tion") zusammenführen –
+        // ohne Bindestrich und ohne Leerzeichen. Ergänzungsstriche mitten in der
+        // Zeile ("Nord- und") bleiben unangetastet.
+        if (eol && /\p{L}-$/u.test(it.str)) text += it.str.slice(0, -1)
+        else text += it.str + " "
+      }
+      pages.push(text.replace(/[ \t]+/g, " ").trim())
       page.cleanup()
     }
     return pages

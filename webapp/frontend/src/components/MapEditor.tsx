@@ -656,7 +656,10 @@ function ColorRow({
   // "none"/"transparent"/leer = transparent (kein Fill/Stroke).
   const isNone = !value || value === "none" || value === "transparent"
   const last = useRef("#000000")
-  if (!isNone) last.current = value
+  // letzten echten Farbwert merken (im Effect, nicht während Render)
+  useEffect(() => {
+    if (!isNone) last.current = value
+  }, [isNone, value])
   return (
     <div className="grid grid-cols-[1fr_176px] items-center gap-2">
       <Label className="text-sm">{label}</Label>

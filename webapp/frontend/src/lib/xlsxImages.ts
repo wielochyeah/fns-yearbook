@@ -79,7 +79,9 @@ function parseAnchors(drawingXml: string): Anchor[] {
           blips[0].getAttributeNS(REL_NS, "embed") ||
           blips[0].getAttribute("r:embed")
       }
-      if (embedId) out.push({ row: isNaN(row) ? 0 : row, embedId })
+      // Nur Zell-Anker (mit <row>) verwenden; absoluteAnchor hat keine Zeile
+      // und würde sonst fälschlich auf Zeile 1 (Kopfzeile) gemappt.
+      if (embedId && rowEls.length) out.push({ row: isNaN(row) ? 0 : row, embedId })
     }
   }
   return out
