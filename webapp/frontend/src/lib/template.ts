@@ -354,10 +354,11 @@ export type FillOptions = {
   name: string
   chartSvg: string
   photoDataUrl?: string | null
-  // Natürliche Bildmaße + Fokuspunkt (0..1) für frei wählbaren Bildausschnitt
-  // beim Fill. Ohne diese Angaben: zentriertes Cover (Fallback).
+  // Natürliche Bildmaße + Bildausschnitt für den Fill. photoCrop als Bild-
+  // fraktionen {x,y,w,h} (Rechteck) ODER nur {x,y} = Fokuspunkt über der Cover-
+  // Region. Ohne Angaben: zentriertes Cover (Fallback).
   photoSize?: { w: number; h: number }
-  photoCrop?: { x: number; y: number }
+  photoCrop?: { x: number; y: number; w?: number; h?: number }
   fontFaceCss: string
   config: TemplateConfig
 }
@@ -539,22 +540,35 @@ export function fillTemplate(opts: FillOptions): string {
     if (!photoDataUrl) {
       image.parentNode?.removeChild(image)
     } else if (photoSize && photoSize.w > 0 && photoSize.h > 0) {
-      // Frei wählbarer Bildausschnitt: verschachteltes <svg> als Rahmen (clippt
-      // automatisch), Bild exakt wie CSS object-fit:cover + object-position.
+      // Frei wählbarer Bildausschnitt -> Rahmen, via verschachteltes <svg>
+      // (clippt automatisch). Crop als Bildfraktionen {x,y,w,h}; ohne w/h wird
+      // x,y als Fokuspunkt über der Cover-Region interpretiert.
       const fr = imageFrameRect(image)
-      const cx = clamp01(photoCrop?.x ?? 0.5)
-      const cy = clamp01(photoCrop?.y ?? 0.5)
-      const cover = Math.max(fr.w / photoSize.w, fr.h / photoSize.h)
-      const sw = photoSize.w * cover
-      const sh = photoSize.h * cover
+      const iw = photoSize.w
+      const ih = photoSize.h
+      const frAspect = fr.w / fr.h
+      const imgAspect = iw / ih
+      let cw = photoCrop?.w
+      let ch = photoCrop?.h
+      let cxf = photoCrop?.x ?? 0.5
+      let cyf = photoCrop?.y ?? 0.5
+      if (cw == null || ch == null) {
+        cw = imgAspect > frAspect ? frAspect / imgAspect : 1
+        ch = imgAspect > frAspect ? 1 : imgAspect / frAspect
+        cxf = clamp01(cxf) * (1 - cw)
+        cyf = clamp01(cyf) * (1 - ch)
+      }
+      const scale = Math.max(fr.w / (cw * iw), fr.h / (ch * ih))
+      const sw = iw * scale
+      const sh = ih * scale
       const ns = doc.createElementNS(SVGNS, "svg")
       ns.setAttribute("x", String(fr.x))
       ns.setAttribute("y", String(fr.y))
       ns.setAttribute("width", String(fr.w))
       ns.setAttribute("height", String(fr.h))
       const im = doc.createElementNS(SVGNS, "image")
-      im.setAttribute("x", String(cx * (fr.w - sw)))
-      im.setAttribute("y", String(cy * (fr.h - sh)))
+      im.setAttribute("x", String(fr.w / 2 - (cxf + cw / 2) * sw))
+      im.setAttribute("y", String(fr.h / 2 - (cyf + ch / 2) * sh))
       im.setAttribute("width", String(sw))
       im.setAttribute("height", String(sh))
       im.setAttribute("preserveAspectRatio", "none")

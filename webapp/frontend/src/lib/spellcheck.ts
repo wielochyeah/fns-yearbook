@@ -34,6 +34,7 @@ export type SpellResult = {
   wordsChecked: number
   columns: string[]
   truncated: boolean
+  unit: string // Bezeichnung der Gruppen-Einheit: "Zeile" (Excel) | "Seite" (PDF)
 }
 
 const MAX_ERRORS = 2000
@@ -99,6 +100,42 @@ function isSkippableToken(token: string): boolean {
 // Buchstabenläufe (inkl. Umlaute/ß); Bindestrich/Apostroph trennen
 const WORD_RE = /[\p{L}\p{M}]+/gu
 
+// Durchsucht einen Text Wort für Wort und meldet unbekannte Wörter über onError.
+// Liefert die Anzahl tatsächlich geprüfter Wörter. Gemeinsame Logik für Excel
+// (je Zelle) und PDF/Freitext (je Seite).
+function scanText(
+  text: string,
+  de: Hunspell,
+  en: Hunspell,
+  allow: Set<string>,
+  onError: (word: string, offset: number) => boolean // false = abbrechen
+): number {
+  let words = 0
+  for (const m of text.matchAll(WORD_RE)) {
+    const word = m[0]
+    const offset = m.index ?? 0
+    if (isSkippableToken(word)) continue
+    if (allow.has(word.toLowerCase())) continue
+
+    // Abkürzungen / Trunkierungen nicht als Fehler werten:
+    const after = text.slice(offset + word.length)
+    // hängender Bindestrich (Ergänzungsstrich): "Kommunikations- und …"
+    if (/^-(\s|$)/.test(after)) continue
+    // Wort direkt gefolgt von "." – nur überspringen, wenn danach KEIN Satzanfang
+    // steht (Ziffer/Komma/Klammer oder Kleinbuchstabe → Abkürzung).
+    if (after.startsWith(".")) {
+      const next = after.slice(1).replace(/^\s+/, "").charAt(0)
+      if (next && (/[0-9,;)]/.test(next) || /\p{Ll}/u.test(next))) continue
+    }
+
+    words++
+    // Fehler nur, wenn weder Deutsch noch Englisch das Wort kennen.
+    if (de.spell(word) || en.spell(word)) continue
+    if (!onError(word, offset)) break
+  }
+  return words
+}
+
 export async function checkWorkbook(
   parsed: ParsedWorkbook,
   ignore: Set<string> = new Set()
@@ -149,44 +186,25 @@ export async function checkWorkbook(
       if (isNonProse(text)) continue
       cellsChecked++
 
-      for (const m of text.matchAll(WORD_RE)) {
-        const word = m[0]
-        const offset = m.index ?? 0
-        if (isSkippableToken(word)) continue
-        if (allow.has(word.toLowerCase())) continue
-
-        // Abkürzungen / Trunkierungen nicht als Fehler werten:
-        const after = text.slice(offset + word.length)
-        // hängender Bindestrich (Ergänzungsstrich): "Kommunikations- und …"
-        if (/^-(\s|$)/.test(after)) continue
-        // Wort direkt gefolgt von "." – nur überspringen, wenn danach KEIN
-        // Satzanfang steht (Ziffer/Komma/Klammer oder Kleinbuchstabe →
-        // Abkürzung wie „Bergstr. 3", „Leihmuttersch.,"). Großbuchstabe oder
-        // Satzende danach bleibt prüfbar (echtes Satzende).
-        if (after.startsWith(".")) {
-          const next = after.slice(1).replace(/^\s+/, "").charAt(0)
-          if (next && (/[0-9,;)]/.test(next) || /\p{Ll}/u.test(next))) continue
-        }
-
-        wordsChecked++
-        // Fehler nur, wenn weder Deutsch noch Englisch das Wort kennen.
-        if (de.spell(word) || en.spell(word)) continue
-
+      const col = parsed.header[c] || `Spalte ${c + 1}`
+      wordsChecked += scanText(text, de, en, allow, (word, offset) => {
         errors.push({
           rowExcel,
           name,
-          column: parsed.header[c] || `Spalte ${c + 1}`,
+          column: col,
           text,
           word,
           offset,
           suggestions: suggestFor(word),
         })
-        columnsWithErrors.add(parsed.header[c] || `Spalte ${c + 1}`)
+        columnsWithErrors.add(col)
         if (errors.length >= MAX_ERRORS) {
           truncated = true
-          break outer
+          return false
         }
-      }
+        return true
+      })
+      if (truncated) break outer
     }
   }
 
@@ -196,5 +214,71 @@ export async function checkWorkbook(
     wordsChecked,
     columns: [...columnsWithErrors],
     truncated,
+    unit: "Zeile",
+  }
+}
+
+// Prüft Freitext seitenweise (z. B. aus einem PDF) – eine Zeichenkette je Seite.
+export async function checkText(
+  pages: string[],
+  ignore: Set<string> = new Set()
+): Promise<SpellResult> {
+  const { de, en } = await loadDictionary()
+
+  const allow = new Set<string>(BUILTIN_ALLOW)
+  for (const w of CURATED_ALLOW) allow.add(w)
+  for (const w of ignore) allow.add(w.toLowerCase())
+
+  const suggestCache = new Map<string, string[]>()
+  const suggestFor = (word: string): string[] => {
+    const key = word.toLowerCase()
+    let s = suggestCache.get(key)
+    if (!s) {
+      s = de.suggest(word).slice(0, 6)
+      suggestCache.set(key, s)
+    }
+    return s
+  }
+
+  const errors: SpellError[] = []
+  let cellsChecked = 0
+  let wordsChecked = 0
+  let truncated = false
+
+  outer: for (let p = 0; p < pages.length; p++) {
+    // URLs/E-Mails entfernen, damit sie keine Falschtreffer erzeugen.
+    const text = (pages[p] || "")
+      .replace(/https?:\/\/\S+/gi, " ")
+      .replace(/www\.\S+/gi, " ")
+      .replace(/\S+@\S+\.\S+/g, " ")
+    if (text.trim() === "") continue
+    cellsChecked++
+    const pageNo = p + 1
+    wordsChecked += scanText(text, de, en, allow, (word, offset) => {
+      errors.push({
+        rowExcel: pageNo,
+        name: null,
+        column: "",
+        text,
+        word,
+        offset,
+        suggestions: suggestFor(word),
+      })
+      if (errors.length >= MAX_ERRORS) {
+        truncated = true
+        return false
+      }
+      return true
+    })
+    if (truncated) break outer
+  }
+
+  return {
+    errors,
+    cellsChecked,
+    wordsChecked,
+    columns: [],
+    truncated,
+    unit: "Seite",
   }
 }

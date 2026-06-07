@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
 } from "react"
 import {
   Download,
@@ -13,6 +14,8 @@ import {
   Loader2,
   Settings,
   Crop,
+  ChevronLeft,
+  ChevronRight,
   X,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -130,10 +133,11 @@ export function ChartsPage({
   // Zuordnung Person (Excel-Zeile) -> Dateiname; automatisch per Vorname_Nachname,
   // im Frontend manuell überschreibbar.
   const [assignments, setAssignments] = useState<Record<number, string>>({})
-  // Bildausschnitt (Fokuspunkt 0..1) je Person für das Fill; Default = Mitte.
-  const [crops, setCrops] = useState<Record<number, { x: number; y: number }>>(
-    {}
-  )
+  // Bildausschnitt je Person für das Fill: Rechteck in Bildfraktionen {x,y,w,h}
+  // (im Rahmen-Seitenverhältnis). Ohne Eintrag: zentriertes Cover.
+  const [crops, setCrops] = useState<
+    Record<number, { x: number; y: number; w: number; h: number }>
+  >({})
   const [tplBusy, setTplBusy] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [tplConfig, setTplConfig] = useState<TemplateConfig>(() => {
@@ -168,6 +172,89 @@ export function ChartsPage({
   useEffect(() => {
     setLabels(parsed?.traits ?? [])
   }, [parsed])
+
+  // --- Steckbrief-Live-Vorschau ------------------------------------------- //
+  const [previewIdx, setPreviewIdx] = useState(0)
+  const [excelImages, setExcelImages] = useState<Map<number, string>>(new Map())
+  const [fontTick, setFontTick] = useState(0)
+  useEffect(() => {
+    setPreviewIdx(0)
+  }, [parsed])
+  // Fotos aus Excel einmalig extrahieren (für die Vorschau, wenn Quelle = Excel).
+  useEffect(() => {
+    let cancelled = false
+    if (photoSource === "excel" && file) {
+      extractRowImages(file)
+        .then((m) => !cancelled && setExcelImages(m))
+        .catch(() => {})
+    } else {
+      setExcelImages(new Map())
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [photoSource, file])
+  // Montserrat in den genutzten Gewichten laden (Vorschau nutzt die geladenen
+  // Schriften direkt – kein Einbetten nötig). Tick erzwingt Neu-Render nach dem Laden.
+  useEffect(() => {
+    let cancelled = false
+    if (!templateSvg) return
+    Promise.all(configWeights(tplConfig).map((w) => prepareMontserrat(w)))
+      .then(() => !cancelled && setFontTick((t) => t + 1))
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [templateSvg, tplConfig])
+
+  const previewSteckbrief = useMemo(() => {
+    if (!parsed || !templateSvg || !charts.length) return null
+    const idx = Math.min(Math.max(0, previewIdx), parsed.people.length - 1)
+    const p = parsed.people[idx]
+    if (!p || !charts[idx]) return null
+    const upFile =
+      photoSource === "upload"
+        ? uploadedFiles.find((f) => f.fileName === assignments[p.rowExcel])
+        : undefined
+    const photo =
+      photoSource === "excel"
+        ? excelImages.get(p.rowExcel) ?? null
+        : upFile?.dataUrl ?? null
+    try {
+      return {
+        name: p.name,
+        idx,
+        svg: fillTemplate({
+          templateSvg,
+          header: parsed.header,
+          row: parsed.rows[p.rowExcel - 2],
+          name: p.name,
+          chartSvg: charts[idx].svg,
+          photoDataUrl: photo,
+          photoSize:
+            upFile && upFile.w > 0 ? { w: upFile.w, h: upFile.h } : undefined,
+          photoCrop: crops[p.rowExcel],
+          fontFaceCss: "",
+          config: tplConfig,
+        }),
+      }
+    } catch {
+      return null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    parsed,
+    templateSvg,
+    charts,
+    previewIdx,
+    photoSource,
+    uploadedFiles,
+    assignments,
+    excelImages,
+    crops,
+    fontTick,
+    tplConfig,
+  ])
 
   const labelsDirty =
     !!parsed &&
@@ -735,6 +822,71 @@ export function ChartsPage({
 
       {/* Vorschau */}
       <div className="flex flex-col gap-4">
+        {/* Steckbrief-Live-Vorschau (sobald eine Vorlage geladen ist) */}
+        {templateSvg && parsed && charts.length > 0 && (
+          <Card className="overflow-hidden">
+            <CardHeader className="gap-2 pb-3">
+              <CardTitle className="flex items-center justify-between gap-2 text-base">
+                <span>Steckbrief-Vorschau</span>
+                {previewSteckbrief && (
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="size-7"
+                      disabled={previewSteckbrief.idx <= 0}
+                      onClick={() => setPreviewIdx(previewSteckbrief.idx - 1)}
+                    >
+                      <ChevronLeft className="size-4" />
+                    </Button>
+                    <span className="w-14 text-center text-xs text-muted-foreground">
+                      {previewSteckbrief.idx + 1} / {parsed.people.length}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="size-7"
+                      disabled={
+                        previewSteckbrief.idx >= parsed.people.length - 1
+                      }
+                      onClick={() => setPreviewIdx(previewSteckbrief.idx + 1)}
+                    >
+                      <ChevronRight className="size-4" />
+                    </Button>
+                  </div>
+                )}
+              </CardTitle>
+              <select
+                className={SELECT_CLS}
+                value={previewSteckbrief?.idx ?? 0}
+                onChange={(e) => setPreviewIdx(parseInt(e.target.value) || 0)}
+              >
+                {parsed.people.map((pp, i) => (
+                  <option key={i} value={i}>
+                    {i + 1}. {pp.name}
+                  </option>
+                ))}
+              </select>
+            </CardHeader>
+            <CardContent>
+              {previewSteckbrief ? (
+                <div
+                  className="overflow-hidden rounded-md border [&>svg]:h-auto [&>svg]:w-full"
+                  style={{ backgroundColor: "#ffffff" }}
+                  dangerouslySetInnerHTML={{ __html: previewSteckbrief.svg }}
+                />
+              ) : (
+                <div className="text-sm text-muted-foreground">
+                  Vorschau wird erstellt …
+                </div>
+              )}
+              <p className="mt-2 text-xs text-muted-foreground">
+                Live-Vorschau (Doppelseite) – entspricht dem späteren PDF-/SVG-Export.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-medium text-muted-foreground">
             Vorschau{" "}
@@ -825,6 +977,51 @@ function ColorRow({
 
 const SELECT_CLS =
   "h-8 w-full rounded-md border bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+
+type Rect = { x: number; y: number; w: number; h: number }
+const clmp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
+
+// Größtes Rechteck im Rahmen-Seitenverhältnis, das ins Bild passt, zentriert
+// (= Cover-Region als Bildfraktionen). Default-Bildausschnitt.
+function coverRect(imgW: number, imgH: number, aspect: number): Rect {
+  const ia = imgW / imgH
+  const w = ia > aspect ? aspect / ia : 1
+  const h = ia > aspect ? 1 : ia / aspect
+  return { x: (1 - w) / 2, y: (1 - h) / 2, w, h }
+}
+
+// Neues Crop-Rechteck beim Ziehen einer Ecke (Seitenverhältnis-erhaltend, in
+// Bildgrenzen geklemmt). fracAspect = w/h im Fraktionsraum; gegenüberliegende
+// Ecke bleibt fix.
+function resizeRect(
+  corner: "nw" | "ne" | "sw" | "se",
+  rect: Rect,
+  mfx: number,
+  mfy: number,
+  fracAspect: number,
+  minW: number
+): Rect {
+  const right = rect.x + rect.w
+  const bottom = rect.y + rect.h
+  const dirX = corner === "ne" || corner === "se" ? 1 : -1
+  const dirY = corner === "sw" || corner === "se" ? 1 : -1
+  const ax = dirX > 0 ? rect.x : right // fixierte X-Kante
+  const ay = dirY > 0 ? rect.y : bottom // fixierte Y-Kante
+  const dw = (mfx - ax) * dirX
+  const dh = (mfy - ay) * dirY
+  let nw = Math.max(dw, dh * fracAspect)
+  const availX = dirX > 0 ? 1 - ax : ax
+  const availY = dirY > 0 ? 1 - ay : ay
+  nw = Math.min(nw, availX, availY * fracAspect)
+  nw = Math.max(nw, minW)
+  const nh = nw / fracAspect
+  return {
+    x: dirX > 0 ? ax : ax - nw,
+    y: dirY > 0 ? ay : ay - nh,
+    w: nw,
+    h: nh,
+  }
+}
 
 function TemplateSettings({
   open,
@@ -1014,10 +1211,10 @@ function PhotoAssign({
   people: { name: string; rowExcel: number }[]
   files: { fileName: string; dataUrl: string; w: number; h: number }[]
   assignments: Record<number, string>
-  crops: Record<number, { x: number; y: number }>
+  crops: Record<number, Rect>
   aspect: number
   onAssign: (rowExcel: number, fileName: string) => void
-  onCrop: (rowExcel: number, c: { x: number; y: number }) => void
+  onCrop: (rowExcel: number, c: Rect) => void
 }) {
   const [editRow, setEditRow] = useState<number | null>(null)
   const fileOf = (rowExcel: number) => {
@@ -1046,7 +1243,8 @@ function PhotoAssign({
         {people.map((p) => {
           const f = fileOf(p.rowExcel)
           const current = f?.fileName ?? ""
-          const crop = crops[p.rowExcel] ?? { x: 0.5, y: 0.5 }
+          const r =
+            f && f.w > 0 ? crops[p.rowExcel] ?? coverRect(f.w, f.h, aspect) : null
           return (
             <div
               key={p.rowExcel}
@@ -1060,15 +1258,27 @@ function PhotoAssign({
                   className="group relative shrink-0 overflow-hidden rounded border bg-muted"
                   style={{ width: W, height: H }}
                 >
-                  <img
-                    src={f.dataUrl}
-                    alt=""
-                    draggable={false}
-                    className="h-full w-full object-cover"
-                    style={{
-                      objectPosition: `${crop.x * 100}% ${crop.y * 100}%`,
-                    }}
-                  />
+                  {r ? (
+                    <img
+                      src={f.dataUrl}
+                      alt=""
+                      draggable={false}
+                      className="absolute max-w-none"
+                      style={{
+                        width: W / r.w,
+                        height: H / r.h,
+                        left: -r.x * (W / r.w),
+                        top: -r.y * (H / r.h),
+                      }}
+                    />
+                  ) : (
+                    <img
+                      src={f.dataUrl}
+                      alt=""
+                      draggable={false}
+                      className="h-full w-full object-cover"
+                    />
+                  )}
                   <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition group-hover:bg-black/35 group-hover:opacity-100">
                     <Crop className="size-4" />
                   </span>
@@ -1129,7 +1339,7 @@ function PhotoAssign({
           imgH={editFile.h}
           aspect={aspect}
           title={editPerson?.name ?? ""}
-          value={crops[editRow] ?? { x: 0.5, y: 0.5 }}
+          value={crops[editRow] ?? coverRect(editFile.w, editFile.h, aspect)}
           onChange={(c) => onCrop(editRow, c)}
           onClose={() => setEditRow(null)}
         />
@@ -1138,10 +1348,10 @@ function PhotoAssign({
   )
 }
 
-// Große Ansicht zum Wählen des sichtbaren Bildausschnitts. Zeigt das ganze Foto;
-// das Auswahlrechteck (im Rahmen-Seitenverhältnis, Cover-Größe) lässt sich per
-// Klick/Ziehen positionieren, der Rest wird abgedunkelt. Der Fokuspunkt (0..1)
-// entspricht 1:1 dem späteren Fill im SVG.
+// Große Ansicht zum Wählen des Bildausschnitts. Zeigt das ganze Foto; das
+// Auswahlrechteck (im Rahmen-Seitenverhältnis) lässt sich ziehen (verschieben)
+// und an den Ecken größer/kleiner ziehen (Zoom). Der Rest wird abgedunkelt. Das
+// Rechteck (Bildfraktionen) entspricht 1:1 dem späteren Fill im SVG.
 function CropModal({
   src,
   imgW,
@@ -1157,35 +1367,58 @@ function CropModal({
   imgH: number
   aspect: number
   title: string
-  value: { x: number; y: number }
-  onChange: (c: { x: number; y: number }) => void
+  value: Rect
+  onChange: (c: Rect) => void
   onClose: () => void
 }) {
   const areaRef = useRef<HTMLDivElement>(null)
-  const dragging = useRef(false)
+  const drag = useRef<{
+    mode: "move" | "nw" | "ne" | "sw" | "se"
+    sx: number
+    sy: number
+    rect: Rect
+  } | null>(null)
   const ds = Math.min(560 / imgW, 460 / imgH)
   const dispW = imgW * ds
   const dispH = imgH * ds
-  // Sichtbare Region (Bildpixel) = größtes Rechteck im Rahmen-Seitenverhältnis.
   const imgAspect = imgW / imgH
-  const vw = imgAspect > aspect ? imgH * aspect : imgW
-  const vh = imgAspect > aspect ? imgH : imgW / aspect
-  const denomX = imgW - vw
-  const denomY = imgH - vh
-  const cx = Math.max(0, Math.min(1, value?.x ?? 0.5))
-  const cy = Math.max(0, Math.min(1, value?.y ?? 0.5))
-  const apply = (clientX: number, clientY: number) => {
-    const r = areaRef.current?.getBoundingClientRect()
-    if (!r) return
-    const mx = (clientX - r.left) / ds
-    const my = (clientY - r.top) / ds
-    const left = Math.max(0, Math.min(denomX, mx - vw / 2))
-    const top = Math.max(0, Math.min(denomY, my - vh / 2))
-    onChange({
-      x: denomX > 0.5 ? left / denomX : 0.5,
-      y: denomY > 0.5 ? top / denomY : 0.5,
-    })
+  const fracAspect = aspect / imgAspect // w/h im Fraktionsraum (verzerrungsfrei)
+  const coverW = imgAspect > aspect ? aspect / imgAspect : 1
+  const minW = coverW * 0.2 // bis ~5× Zoom hinein
+  const r = value
+  const toFrac = (clientX: number, clientY: number) => {
+    const b = areaRef.current?.getBoundingClientRect()
+    if (!b) return { x: 0, y: 0 }
+    return {
+      x: clmp((clientX - b.left) / b.width, 0, 1),
+      y: clmp((clientY - b.top) / b.height, 0, 1),
+    }
   }
+  const onDown =
+    (mode: "move" | "nw" | "ne" | "sw" | "se") =>
+    (e: ReactMouseEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const f = toFrac(e.clientX, e.clientY)
+      drag.current = { mode, sx: f.x, sy: f.y, rect: r }
+    }
+  const onMove = (e: ReactMouseEvent) => {
+    const d = drag.current
+    if (!d) return
+    const f = toFrac(e.clientX, e.clientY)
+    if (d.mode === "move") {
+      onChange({
+        ...d.rect,
+        x: clmp(d.rect.x + (f.x - d.sx), 0, 1 - d.rect.w),
+        y: clmp(d.rect.y + (f.y - d.sy), 0, 1 - d.rect.h),
+      })
+    } else {
+      onChange(resizeRect(d.mode, d.rect, f.x, f.y, fracAspect, minW))
+    }
+  }
+  const onUp = () => (drag.current = null)
+  const HANDLE =
+    "absolute h-3 w-3 rounded-sm border border-white bg-black/70 shadow"
   return (
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
@@ -1211,15 +1444,11 @@ function CropModal({
         <div className="p-4">
           <div
             ref={areaRef}
-            className="relative mx-auto cursor-crosshair select-none overflow-hidden rounded"
+            className="relative mx-auto select-none overflow-hidden rounded"
             style={{ width: dispW, height: dispH }}
-            onMouseDown={(e) => {
-              dragging.current = true
-              apply(e.clientX, e.clientY)
-            }}
-            onMouseMove={(e) => dragging.current && apply(e.clientX, e.clientY)}
-            onMouseUp={() => (dragging.current = false)}
-            onMouseLeave={() => (dragging.current = false)}
+            onMouseMove={onMove}
+            onMouseUp={onUp}
+            onMouseLeave={onUp}
           >
             <img
               src={src}
@@ -1228,23 +1457,45 @@ function CropModal({
               className="pointer-events-none block h-full w-full object-contain"
             />
             <div
-              className="pointer-events-none absolute border-2 border-white"
+              className="absolute cursor-move border-2 border-white"
               style={{
-                left: ds * cx * denomX,
-                top: ds * cy * denomY,
-                width: ds * vw,
-                height: ds * vh,
+                left: r.x * dispW,
+                top: r.y * dispH,
+                width: r.w * dispW,
+                height: r.h * dispH,
                 boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)",
               }}
+              onMouseDown={onDown("move")}
             >
-              <div className="absolute left-1/3 top-0 h-full w-px bg-white/40" />
-              <div className="absolute left-2/3 top-0 h-full w-px bg-white/40" />
-              <div className="absolute left-0 top-1/3 h-px w-full bg-white/40" />
-              <div className="absolute left-0 top-2/3 h-px w-full bg-white/40" />
+              <div className="pointer-events-none absolute left-1/3 top-0 h-full w-px bg-white/40" />
+              <div className="pointer-events-none absolute left-2/3 top-0 h-full w-px bg-white/40" />
+              <div className="pointer-events-none absolute left-0 top-1/3 h-px w-full bg-white/40" />
+              <div className="pointer-events-none absolute left-0 top-2/3 h-px w-full bg-white/40" />
+              <span
+                className={HANDLE}
+                style={{ left: -7, top: -7, cursor: "nwse-resize" }}
+                onMouseDown={onDown("nw")}
+              />
+              <span
+                className={HANDLE}
+                style={{ right: -7, top: -7, cursor: "nesw-resize" }}
+                onMouseDown={onDown("ne")}
+              />
+              <span
+                className={HANDLE}
+                style={{ left: -7, bottom: -7, cursor: "nesw-resize" }}
+                onMouseDown={onDown("sw")}
+              />
+              <span
+                className={HANDLE}
+                style={{ right: -7, bottom: -7, cursor: "nwse-resize" }}
+                onMouseDown={onDown("se")}
+              />
             </div>
           </div>
           <p className="pt-3 text-center text-xs text-muted-foreground">
-            Klicken oder ziehen, um den sichtbaren Ausschnitt zu positionieren.
+            Rechteck ziehen zum Verschieben · an den Ecken größer/kleiner ziehen
+            (Zoom). Vorschau = späterer Ausschnitt.
           </p>
         </div>
         <div className="border-t px-4 py-3 text-right">

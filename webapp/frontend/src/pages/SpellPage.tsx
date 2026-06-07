@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { SpellCheck, Loader2, CheckCircle2, X, AlertTriangle, RotateCcw } from "lucide-react"
+import {
+  SpellCheck,
+  Loader2,
+  CheckCircle2,
+  X,
+  AlertTriangle,
+  RotateCcw,
+  FileText,
+} from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -59,22 +67,65 @@ export function SpellPage({
   const [checking, setChecking] = useState(false)
   const [ignore, setIgnore] = useState<Set<string>>(() => loadIgnore())
   const [mutedCols, setMutedCols] = useState<Set<string>>(new Set())
+  // PDF-Quelle (zusätzlich zu Excel). source bestimmt, was geprüft wird.
+  const [pdfPages, setPdfPages] = useState<string[] | null>(null)
+  const [pdfName, setPdfName] = useState<string | null>(null)
+  const [pdfBusy, setPdfBusy] = useState(false)
+  const [source, setSource] = useState<"excel" | "pdf">("excel")
   const ranRef = useRef(false)
 
   useEffect(() => {
     saveIgnore(ignore)
   }, [ignore])
 
+  const selectExcel = (f: File | null) => {
+    setSource("excel")
+    onSelect(f)
+  }
+  const loadSampleExcel = () => {
+    setSource("excel")
+    onLoadSample()
+  }
+
+  async function onPdf(f: File | null) {
+    if (!f) return
+    setPdfBusy(true)
+    setResult(null)
+    try {
+      const { extractPdfText } = await import("@/lib/pdfText")
+      const pages = await extractPdfText(f)
+      setPdfPages(pages)
+      setPdfName(f.name)
+      setSource("pdf")
+      if (!pages.join("").trim()) {
+        toast.warning("Im PDF wurde kein Text gefunden", {
+          description: "Vermutlich ein gescanntes Bild-PDF (kein Text-Layer).",
+        })
+      }
+    } catch (err) {
+      toast.error("PDF konnte nicht gelesen werden", {
+        description: (err as Error).message,
+      })
+    } finally {
+      setPdfBusy(false)
+    }
+  }
+
+  const canCheck = source === "pdf" ? !!pdfPages : !!parsed
+
   async function runCheck() {
-    if (!parsed) return
+    if (!canCheck) return
     setChecking(true)
     setResult(null)
     setMutedCols(new Set())
     try {
       // kurz warten, damit der Spinner sichtbar wird
       await new Promise((r) => setTimeout(r, 20))
-      const { checkWorkbook } = await import("@/lib/spellcheck")
-      const res = await checkWorkbook(parsed, ignore)
+      const spell = await import("@/lib/spellcheck")
+      const res =
+        source === "pdf" && pdfPages
+          ? await spell.checkText(pdfPages, ignore)
+          : await spell.checkWorkbook(parsed!, ignore)
       setResult(res)
     } catch (err) {
       console.error("[spellcheck] failed:", err)
@@ -133,20 +184,49 @@ export function SpellPage({
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Badge variant="secondary">1</Badge> Excel-Datei
+              <Badge variant="secondary">1</Badge> Datei (Excel oder PDF)
             </CardTitle>
             <CardDescription>
-              Prüft alle Texte des Sheets auf deutsche Rechtschreibung – komplett
-              im Browser, nichts wird hochgeladen.
+              Prüft alle Texte auf deutsche Rechtschreibung – komplett im Browser,
+              nichts wird hochgeladen.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             <FileDropzone
-              file={file}
-              onSelect={onSelect}
-              onLoadSample={onLoadSample}
+              file={source === "excel" ? file : null}
+              onSelect={selectExcel}
+              onLoadSample={loadSampleExcel}
               busy={busy}
             />
+
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="h-px flex-1 bg-border" /> oder PDF
+              <span className="h-px flex-1 bg-border" />
+            </div>
+
+            <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-dashed px-3 py-2.5 text-sm hover:bg-muted/40">
+              {pdfBusy ? (
+                <Loader2 className="size-4 shrink-0 animate-spin" />
+              ) : (
+                <FileText className="size-4 shrink-0 text-muted-foreground" />
+              )}
+              <span className="min-w-0 flex-1 truncate">
+                {source === "pdf" && pdfName
+                  ? pdfName
+                  : "PDF auswählen oder hierher ziehen"}
+              </span>
+              <input
+                type="file"
+                accept="application/pdf,.pdf"
+                className="hidden"
+                onChange={(e) => onPdf(e.target.files?.[0] ?? null)}
+              />
+            </label>
+            {source === "pdf" && pdfPages && (
+              <div className="text-xs text-muted-foreground">
+                {pdfPages.length} Seite(n) Text extrahiert
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -161,7 +241,7 @@ export function SpellPage({
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
-            <Button size="lg" onClick={runCheck} disabled={!parsed || checking}>
+            <Button size="lg" onClick={runCheck} disabled={!canCheck || checking}>
               {checking ? <Loader2 className="animate-spin" /> : <SpellCheck />}
               Rechtschreibung prüfen
             </Button>
@@ -173,8 +253,9 @@ export function SpellPage({
             )}
             {result && !checking && (
               <div className="text-xs text-muted-foreground">
-                {result.cellsChecked} Zellen · {result.wordsChecked} Wörter
-                geprüft
+                {result.cellsChecked}{" "}
+                {result.unit === "Seite" ? "Seiten" : "Zellen"} ·{" "}
+                {result.wordsChecked} Wörter geprüft
               </div>
             )}
             {ignore.size > 0 && (
@@ -246,9 +327,9 @@ export function SpellPage({
           <Placeholder
             icon={<SpellCheck className="size-10 text-muted-foreground/50" />}
             text={
-              parsed
-                ? "Klicke auf „Rechtschreibung prüfen“, um das Sheet zu prüfen."
-                : "Wähle eine Excel-Datei oder lade die Beispieldaten."
+              canCheck
+                ? "Klicke auf „Rechtschreibung prüfen“."
+                : "Wähle eine Excel-Datei oder ein PDF (oder lade die Beispieldaten)."
             }
           />
         ) : filtered.length === 0 ? (
@@ -272,9 +353,10 @@ export function SpellPage({
               <Card key={g.rowExcel} className="gap-0 py-4">
                 <CardHeader className="px-4 pb-2">
                   <CardTitle className="text-base">
-                    {g.name ?? `Zeile ${g.rowExcel}`}{" "}
+                    {g.name ?? `${result?.unit ?? "Zeile"} ${g.rowExcel}`}{" "}
                     <span className="text-xs font-normal text-muted-foreground">
-                      · Zeile {g.rowExcel} · {g.errors.length} Treffer
+                      {g.name ? `· ${result?.unit ?? "Zeile"} ${g.rowExcel} ` : ""}
+                      · {g.errors.length} Treffer
                     </span>
                   </CardTitle>
                 </CardHeader>
@@ -308,13 +390,15 @@ function ErrorRow({ err, onIgnore }: { err: SpellError; onIgnore: () => void }) 
     <div className="rounded-md border bg-muted/30 p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <Badge
-            variant="outline"
-            title={err.column}
-            className="max-w-[220px] text-[11px] [&>*]:truncate"
-          >
-            <span className="truncate">{err.column}</span>
-          </Badge>
+          {err.column && (
+            <Badge
+              variant="outline"
+              title={err.column}
+              className="max-w-[220px] text-[11px] [&>*]:truncate"
+            >
+              <span className="truncate">{err.column}</span>
+            </Badge>
+          )}
           <span className="font-mono font-semibold text-rose-600">
             {err.word}
           </span>

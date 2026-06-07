@@ -1,15 +1,21 @@
-import { useCallback, useEffect, useState } from "react"
-import { BarChart3, SpellCheck } from "lucide-react"
+import { lazy, Suspense, useCallback, useEffect, useState } from "react"
+import { BarChart3, SpellCheck, Map as MapIcon, Globe } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import { Toaster } from "@/components/ui/sonner"
 import { ChartsPage } from "@/pages/ChartsPage"
 import { SpellPage } from "@/pages/SpellPage"
+import { MapPage } from "@/pages/MapPage"
 import { parseFile, type ParsedWorkbook } from "@/lib/excel"
 import fnfLogo from "@/assets/fnf-logo.svg"
 
-type Page = "charts" | "spell"
+// Weltkarte enthält große Geodaten -> erst beim Öffnen laden (eigener Chunk).
+const WorldMapPage = lazy(() =>
+  import("@/pages/WorldMapPage").then((m) => ({ default: m.WorldMapPage }))
+)
+
+type Page = "charts" | "spell" | "map" | "world"
 
 const demoParam = new URLSearchParams(window.location.search).get("demo")
 
@@ -97,7 +103,8 @@ function App() {
                 FNF-Jahrbuch
               </h1>
               <p className="text-xs text-muted-foreground">
-                Excel-Sheet zu Slider-Charts &amp; Rechtschreibfehler-Check
+                Slider-Charts, Steckbriefe, Rechtschreibprüfung, Deutschland- &amp;
+                Weltkarte
               </p>
             </div>
           </div>
@@ -117,6 +124,20 @@ function App() {
             >
               <SpellCheck /> Rechtschreibprüfung
             </Button>
+            <Button
+              variant={page === "map" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setPage("map")}
+            >
+              <MapIcon /> Deutschland-Karte
+            </Button>
+            <Button
+              variant={page === "world" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setPage("world")}
+            >
+              <Globe /> Weltkarte
+            </Button>
           </nav>
         </div>
       </header>
@@ -124,8 +145,20 @@ function App() {
       <main className="mx-auto max-w-6xl px-6 py-8">
         {page === "charts" ? (
           <ChartsPage {...pageProps} />
-        ) : (
+        ) : page === "spell" ? (
           <SpellPage {...pageProps} autoRun={demo === "spell"} />
+        ) : page === "map" ? (
+          <MapPage />
+        ) : (
+          <Suspense
+            fallback={
+              <div className="py-16 text-center text-sm text-muted-foreground">
+                Weltkarte wird geladen …
+              </div>
+            }
+          >
+            <WorldMapPage />
+          </Suspense>
         )}
       </main>
     </div>
